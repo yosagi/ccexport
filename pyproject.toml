@@ -3,8 +3,9 @@ name = "ccexport"
 version = "0.1.0"
 description = "Export Claude Code session logs to HTML/Markdown/Org/JSON"
 authors = [
-    { name = "Tomoaki Yoshida[Z4]", email = "yoshida@furo.org" }
+    { name = "@yosagi" }
 ]
+license = "BSD-3-Clause"
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.0.0",

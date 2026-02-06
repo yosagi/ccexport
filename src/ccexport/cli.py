@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2025-2026 @yosagi
 """ccexport - Claude Code conversation export tool
 
 Export conversations to files by specifying session IDs.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2025-2026 @yosagi
 """Loading osc-tap logs and title mapping"""
 
 import json
