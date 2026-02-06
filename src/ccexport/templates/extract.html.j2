@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+
+    <!-- Prism.js for syntax highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css">
+
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #34495e;
+            --accent-color: #3498db;
+            --bg-color: #ffffff;
+            --text-color: #2c3e50;
+            --border-color: #e1e4e8;
+            --code-bg: #f6f8fa;
+            --user-bg: #f0f7ff;
+            --assistant-bg: #f9f9f9;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        header h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .metadata {
+            display: flex;
+            gap: 2rem;
+            flex-wrap: wrap;
+            opacity: 0.9;
+            font-size: 0.95rem;
+        }
+
+        .metadata-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .conversation {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            overflow: hidden;
+        }
+
+        .message {
+            padding: 1.5rem;
+        }
+
+        .message-user {
+            background-color: var(--user-bg);
+            border-left: 4px solid var(--accent-color);
+        }
+
+        .message-assistant {
+            background-color: var(--assistant-bg);
+            border-left: 4px solid #95a5a6;
+        }
+
+        .message-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .message-role {
+            font-weight: 600;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .message-user .message-role {
+            color: var(--accent-color);
+        }
+
+        .message-assistant .message-role {
+            color: #7f8c8d;
+        }
+
+        .message-timestamp {
+            font-size: 0.85rem;
+            color: #7f8c8d;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+        }
+
+        .message-content {
+            font-size: 0.95rem;
+        }
+
+        /* Markdown content styling */
+        .message-content h1,
+        .message-content h2,
+        .message-content h3,
+        .message-content h4,
+        .message-content h5,
+        .message-content h6 {
+            margin-top: 1.5rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+            line-height: 1.25;
+        }
+
+        .message-content h1 { font-size: 1.8rem; }
+        .message-content h2 { font-size: 1.5rem; }
+        .message-content h3 { font-size: 1.25rem; }
+        .message-content h4 { font-size: 1.1rem; }
+
+        .message-content p {
+            margin-bottom: 1rem;
+        }
+
+        .message-content ul,
+        .message-content ol {
+            margin-left: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .message-content li {
+            margin-bottom: 0.5rem;
+        }
+
+        .message-content a {
+            color: var(--accent-color);
+            text-decoration: none;
+        }
+
+        .message-content a:hover {
+            text-decoration: underline;
+        }
+
+        .message-content blockquote {
+            border-left: 4px solid var(--border-color);
+            padding-left: 1rem;
+            margin: 1rem 0;
+            color: #666;
+            font-style: italic;
+        }
+
+        .message-content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1rem 0;
+        }
+
+        .message-content th,
+        .message-content td {
+            border: 1px solid var(--border-color);
+            padding: 0.75rem;
+            text-align: left;
+        }
+
+        .message-content th {
+            background-color: var(--code-bg);
+            font-weight: 600;
+        }
+
+        /* Code blocks with collapsible functionality */
+        .code-block-wrapper {
+            margin: 1rem 0;
+        }
+
+        details.code-block {
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            margin: 1rem 0;
+            background-color: var(--code-bg);
+        }
+
+        details.code-block summary {
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            user-select: none;
+            background-color: #e9ecef;
+            border-radius: 6px 6px 0 0;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        details.code-block summary:hover {
+            background-color: #dee2e6;
+        }
+
+        details.code-block summary::before {
+            content: '▶';
+            display: inline-block;
+            transition: transform 0.2s;
+        }
+
+        details.code-block[open] summary::before {
+            transform: rotate(90deg);
+        }
+
+        details.code-block summary .code-lang {
+            background-color: var(--accent-color);
+            color: white;
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+        }
+
+        details.code-block summary .code-lines {
+            color: #6c757d;
+            font-size: 0.85rem;
+            margin-left: auto;
+        }
+
+        details.code-block pre {
+            margin: 0 !important;
+            border-radius: 0 0 6px 6px !important;
+        }
+
+        /* Inline code */
+        .message-content code:not([class*="language-"]) {
+            background-color: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+            font-size: 0.9em;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+        }
+
+        /* Regular pre/code blocks (not wrapped in details) */
+        .message-content pre {
+            background-color: var(--code-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+
+        .message-content pre code {
+            background: none;
+            padding: 0;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+        }
+
+        /* Session separator */
+        .session-separator {
+            text-align: center;
+            margin: 2rem 0;
+            position: relative;
+        }
+
+        .session-separator::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(to right, transparent, var(--border-color), transparent);
+        }
+
+        .session-separator span {
+            background-color: var(--bg-color);
+            padding: 0 1rem;
+            position: relative;
+            color: #95a5a6;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        /* Table of Contents */
+        .toc {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        .toc h2 {
+            font-size: 1.2rem;
+            color: var(--primary-color);
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--accent-color);
+        }
+
+        .toc-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            counter-reset: toc-counter;
+        }
+
+        .toc-list li {
+            counter-increment: toc-counter;
+            margin-bottom: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+        }
+
+        .toc-list li::before {
+            content: counter(toc-counter) ". ";
+            color: var(--accent-color);
+            font-weight: 600;
+        }
+
+        .toc-list a {
+            color: var(--text-color);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        .toc-list a:hover {
+            color: var(--accent-color);
+            text-decoration: underline;
+        }
+
+        .toc-title {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .toc-list .toc-no-link {
+            color: #95a5a6;
+            font-style: italic;
+        }
+
+        .toc-item-plan {
+            background: linear-gradient(135deg, rgba(76, 175, 80, 0.1), rgba(139, 195, 74, 0.1));
+            padding: 0.3rem 0.5rem;
+            border-radius: 4px;
+            margin-left: 1.5rem;
+            border-left: 3px solid #4caf50;
+            font-size: 0.95em;
+        }
+
+        .toc-item-plan::before {
+            content: "" !important;
+        }
+
+        .toc-plan-marker {
+            font-size: 0.9em;
+            margin-right: 0.2rem;
+        }
+
+        .toc-timestamp {
+            flex-shrink: 0;
+            margin-left: 1rem;
+            font-size: 0.85em;
+            color: #7f8c8d;
+            font-family: monospace;
+        }
+
+        .toc-date {
+            margin-right: 0.5rem;
+            font-weight: 500;
+            color: #5d6d7e;
+        }
+
+        .toc-time {
+            color: #95a5a6;
+        }
+
+        /* Section heading */
+        .section-heading {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            margin: 2rem 0 1rem 0;
+            font-size: 1.2rem;
+            font-weight: 600;
+            scroll-margin-top: 20px;
+        }
+
+        .section-heading::before {
+            content: '📌 ';
+        }
+
+        /* Footer */
+        footer {
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border-color);
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 0.9rem;
+        }
+
+        /* Responsive design */
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+
+            header {
+                padding: 1.5rem;
+            }
+
+            header h1 {
+                font-size: 1.5rem;
+            }
+
+            .metadata {
+                gap: 1rem;
+            }
+
+            .message {
+                padding: 1rem;
+            }
+        }
+
+        /* Approved plan */
+        .approved-plan {
+            background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
+            border: 2px solid #4caf50;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1rem 1.5rem 1.5rem 1.5rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .approved-plan-header {
+            display: flex;
+            align-items: center;
+            font-weight: bold;
+            color: #2e7d32;
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #a5d6a7;
+        }
+        .approved-plan-header::before {
+            content: '✅ ';
+            margin-right: 0.5rem;
+        }
+        .approved-plan-content {
+            background: white;
+            border-radius: 8px;
+            padding: 1rem;
+            overflow-x: auto;
+        }
+        .approved-plan-content h1,
+        .approved-plan-content h2,
+        .approved-plan-content h3 {
+            margin-top: 0.5rem;
+        }
+
+        /* Rejected plan */
+        .rejected-plan {
+            background: #fff3e0;
+            border: 1px solid #ffb74d;
+            border-radius: 8px;
+            padding: 0;
+            margin: 1rem 1.5rem;
+            color: #e65100;
+            font-size: 0.9rem;
+        }
+        .rejected-plan summary {
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .rejected-plan summary::before {
+            content: '❌ ';
+        }
+        .rejected-plan p {
+            padding: 0 1rem 1rem 1rem;
+            margin: 0;
+            color: #795548;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>{{ title }}</h1>
+            <div class="metadata">
+                <div class="metadata-item">
+                    <span>📅 Generated:</span>
+                    <span>{{ generated_at }}</span>
+                </div>
+                <div class="metadata-item">
+                    <span>💬 Conversations:</span>
+                    <span>{{ conversation_count }}</span>
+                </div>
+                {% if session_count %}
+                <div class="metadata-item">
+                    <span>🔗 Sessions:</span>
+                    <span>{{ session_count }}</span>
+                </div>
+                {% endif %}
+            </div>
+        </header>
+
+        {% if unified_toc %}
+        <nav class="toc">
+            <h2>📋 Table of Contents</h2>
+            <ol class="toc-list">
+                {% for item in unified_toc %}
+                <li class="toc-item-{{ item.item_type }}">
+                    <span class="toc-title">
+                        <a href="#{{ item.id }}">
+                            {% if item.item_type == 'plan' %}<span class="toc-plan-marker">📝</span> {% endif %}{{ item.title }}
+                        </a>
+                    </span>
+                    <span class="toc-timestamp">
+                        {% if item.show_date %}<span class="toc-date">{{ item.date }}</span>{% endif %}
+                        {% if item.time %}<span class="toc-time">{{ item.time }}</span>{% endif %}
+                    </span>
+                </li>
+                {% endfor %}
+            </ol>
+        </nav>
+        {% endif %}
+
+        <main>
+            {% for conversation in conversations %}
+                {% if conversation.is_section_start and conversation.section_starts %}
+                {% for section in conversation.section_starts %}
+                <h2 class="section-heading" id="{{ section.id }}">{{ section.title }}</h2>
+                {% endfor %}
+                {% endif %}
+
+                {% if conversation.session_change %}
+                <div class="session-separator">
+                    <span>Session: {{ conversation.session_id }}</span>
+                </div>
+                {% endif %}
+
+                <div class="conversation">
+                    <div class="message message-user">
+                        <div class="message-header">
+                            <span class="message-role">👤 User</span>
+                            <span class="message-timestamp">{{ conversation.timestamp }}</span>
+                        </div>
+                        <div class="message-content">
+                            {{ conversation.user_content | safe }}
+                        </div>
+                    </div>
+
+                    {% if conversation.approved_plan_html %}
+                    <div class="approved-plan" id="{{ conversation.approved_plan_id }}">
+                        <div class="approved-plan-header">Approved Plan</div>
+                        <div class="approved-plan-content">
+                            {{ conversation.approved_plan_html | safe }}
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    {% if conversation.plan_rejected %}
+                    <details class="rejected-plan">
+                        <summary>Plan was rejected</summary>
+                        <p>The user did not approve this plan.</p>
+                    </details>
+                    {% endif %}
+
+                    {% if conversation.assistant_content %}
+                    <div class="message message-assistant">
+                        <div class="message-header">
+                            <span class="message-role">🤖 Assistant</span>
+                            {% if conversation.assistant_timestamp %}
+                            <span class="message-timestamp">{{ conversation.assistant_timestamp }}</span>
+                            {% endif %}
+                        </div>
+                        <div class="message-content">
+                            {{ conversation.assistant_content | safe }}
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        </main>
+
+        <footer>
+            <p>Generated by ccdigest | Claude Code Digest Tool</p>
+        </footer>
+    </div>
+
+    <!-- Prism.js for syntax highlighting -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markdown.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js"></script>
+</body>
+</html>
