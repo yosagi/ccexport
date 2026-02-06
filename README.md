@@ -7,6 +7,14 @@ Export Claude Code conversation logs to html/md/org/json.
 ### Install
 
 ```bash
+pipx install git+https://github.com/yosagi/ccexport.git
+```
+
+Or clone and install locally:
+
+```bash
+git clone https://github.com/yosagi/ccexport.git
+cd ccexport
 pipx install .
 ```
 
@@ -65,7 +73,7 @@ All listing commands support `--json` for JSON output.
 
 ### osc-tap Integration
 
-Use terminal titles captured by [osc-tap](https://github.com/...) as section headings.
+Use terminal titles captured by [osc-tap](https://github.com/yosagi/osc-tap) as section headings.
 
 ```bash
 ccexport export -s 0d73debd -f org -o export.org --titles-dir ~/.local/share/osc-tap/
