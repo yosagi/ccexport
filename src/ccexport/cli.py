@@ -225,6 +225,173 @@ def session_info(session: str, as_json: bool, config_file: Optional[str]):
         click.echo(f"JSONL path: {jsonl_path}")
 
 
+DEFAULT_NAME_TEMPLATE = "{project}_{date}_{session}.{ext}"
+
+
+@cli.command()
+@click.option('--project', '-p', required=True, help='Project name')
+@click.option('--output', '-o', required=True, type=click.Path(),
+              help='Output directory')
+@click.option('--format', '-f', 'output_format', required=True,
+              type=click.Choice(['html', 'md', 'org', 'json']),
+              help='Output format')
+@click.option('--since', default=None,
+              help='Export sessions from this date onward (YYYY-MM-DD)')
+@click.option('--name-template', default=None,
+              help=f'Filename template (default: {DEFAULT_NAME_TEMPLATE}). '
+                   'Variables: {project}, {date}, {session}, {ext}')
+@click.option('--verbose', '-v', is_flag=True, help='Verbose logging')
+@click.option('--config-file', type=click.Path(exists=True),
+              help='Config file path')
+@click.option('--titles-dir', type=click.Path(exists=True),
+              help='osc-tap log directory (for title display)')
+def batch(project: str, output: str, output_format: str,
+          since: Optional[str], name_template: Optional[str],
+          verbose: bool, config_file: Optional[str],
+          titles_dir: Optional[str]):
+    """Batch export all sessions in a project"""
+    total_start = time.time()
+
+    # Load configuration
+    config = Config(config_file=config_file, verbose=verbose)
+    extractor = MessageExtractor(config.projects_dir, config)
+
+    # Get all sessions for the project
+    try:
+        session_list = extractor.get_session_info(project)
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    if not session_list:
+        click.echo(f"No sessions found for project: {project}", err=True)
+        sys.exit(1)
+
+    # Filter by --since
+    if since:
+        session_list = [
+            s for s in session_list
+            if (s.get('start_time') or '') >= since
+        ]
+        if not session_list:
+            click.echo(f"No sessions found since {since}", err=True)
+            sys.exit(1)
+
+    # Prepare output directory
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Filename template
+    template = name_template or DEFAULT_NAME_TEMPLATE
+    titles_path = Path(titles_dir) if titles_dir else None
+
+    # Use basename of project path for filename (avoid absolute path in filename)
+    project_name = Path(project).name
+
+    # Export each session
+    exported = 0
+    failed = 0
+    total = len(session_list)
+
+    for i, session in enumerate(session_list, 1):
+        session_id = session['session_id']
+        start_date = (session.get('start_time') or '')[:10] or 'unknown'
+        short_id = session_id[:8]
+
+        filename = template.format(
+            project=project_name,
+            date=start_date,
+            session=short_id,
+            ext=output_format,
+        )
+        output_path = output_dir / filename
+
+        click.echo(f"[{i}/{total}] Exporting {short_id} ... {filename}", err=True)
+
+        try:
+            _export_single_session(
+                extractor=extractor,
+                project_name=project,
+                session_id=session_id,
+                output_path=output_path,
+                output_format=output_format,
+                config=config,
+                titles_dir=titles_path,
+                verbose=verbose,
+            )
+            exported += 1
+        except Exception as e:
+            click.echo(f"  Error: {e}", err=True)
+            failed += 1
+
+    # Summary
+    elapsed = time.time() - total_start
+    summary = f"Done: {exported}/{total} sessions exported"
+    if failed:
+        summary += f" ({failed} failed)"
+    summary += f" [{elapsed:.1f}s]"
+    click.echo(summary, err=True)
+
+
+def _export_single_session(
+    extractor: MessageExtractor,
+    project_name: str,
+    session_id: str,
+    output_path: Path,
+    output_format: str,
+    config: Config,
+    titles_dir: Optional[Path] = None,
+    verbose: bool = False,
+) -> None:
+    """Export a single session to a file.
+
+    Raises on failure (FileNotFoundError, ValueError, etc.)
+    """
+    def debug(msg: str):
+        if verbose:
+            click.echo(f"[DEBUG] {msg}", err=True)
+
+    # Get continuation session chain
+    session_chain = extractor.get_session_chain(project_name, session_id)
+    if len(session_chain) > 1:
+        debug(f"Continuation chain: {len(session_chain)} sessions")
+
+    # Extract messages from chain
+    all_messages = []
+    all_summaries = []
+    for sid in session_chain:
+        messages = extractor.extract_project_messages(project_name, sid)
+        all_messages.extend(messages)
+        summaries = extractor.extract_project_summaries(project_name, sid)
+        all_summaries.extend(summaries)
+
+    messages = extractor.group_messages_by_user_instruction(all_messages)
+    if not messages:
+        raise ValueError(f"No messages extracted for session {session_id[:8]}")
+
+    debug(f"Messages: {len(all_messages)} raw, {len(messages)} groups")
+
+    # Get title map (osc-tap)
+    titles_map = {}
+    if titles_dir:
+        session_info = extractor.get_session_info(project_name, session_id)
+        start_time = session_info.get('start_time') if session_info else None
+        end_time = session_info.get('end_time') if session_info else None
+        titles_map = get_titles_for_export(
+            titles_dir, session_id, messages, start_time, end_time
+        )
+        debug(f"Titles: {len(titles_map)} items")
+
+    # Format and write
+    content = _format_messages(
+        messages, project_name, output_format, config,
+        all_summaries, titles_map
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
 def _format_messages(messages: list, project_name: str,
                     output_format: str, config: Config,
                     summaries: list = None,

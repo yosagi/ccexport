@@ -40,6 +40,26 @@ Verbose output (timing and debug info)
 ccexport export -s 0d73debd -f html -o export.html -v
 ```
 
+### Batch Export
+
+Export all sessions in a project at once
+
+```bash
+ccexport batch -p /path/to/project -o ./output -f org
+```
+
+Filter by date
+
+```bash
+ccexport batch -p /path/to/project -o ./output -f org --since 2026-02-01
+```
+
+Custom filename template (default: `{project}_{date}_{session}.{ext}`)
+
+```bash
+ccexport batch -p /path/to/project -o ./output -f md --name-template "{date}_{session}.{ext}"
+```
+
 ### Listing Sessions and Projects
 
 List sessions for a project
