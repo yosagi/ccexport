@@ -9,7 +9,7 @@ Export Claude Code conversation logs in org-mode format.
 import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
-from .osc_tap_loader import parse_iso_timestamp, format_local_timestamp
+from .osc_tap_loader import parse_iso_timestamp, format_local_timestamp, format_duration
 
 
 def _to_local_ts(ts_str: str) -> str:
@@ -221,6 +221,11 @@ class OrgFormatter:
         if start_time and end_time:
             lines.append(f"- Period: {start_time} ~ {end_time}")
 
+        # Total AI time
+        total_ms = sum(msg.get('duration_ms', 0) or 0 for msg in messages)
+        if total_ms > 0:
+            lines.append(f"- Total AI time: {format_duration(total_ms)}")
+
         lines.append("")
 
         return lines
@@ -258,11 +263,15 @@ class OrgFormatter:
         session_id = user_msg.get('sessionId', '')
         user_content = user_msg.get('content', '')
 
-        # User instruction section (datetime + summary)
+        # Duration display
+        duration_ms = msg.get('duration_ms')
+        duration_str = f" ({format_duration(duration_ms)})" if duration_ms is not None else ""
+
+        # User instruction section (datetime + summary + duration)
         if summary_text:
-            lines.append(f"** {timestamp} - {summary_text}")
+            lines.append(f"** {timestamp}{duration_str} - {summary_text}")
         else:
-            lines.append(f"** {timestamp}")
+            lines.append(f"** {timestamp}{duration_str}")
         lines.append(":PROPERTIES:")
         lines.append(f":CUSTOM_ID: msg-{index}")
         lines.append(f":SESSION_ID: {session_id[:8]}..." if session_id else ":SESSION_ID:")

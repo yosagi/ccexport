@@ -7,7 +7,7 @@ Format extracted messages in Markdown format
 """
 
 from datetime import datetime
-from .osc_tap_loader import parse_iso_timestamp, format_local_timestamp
+from .osc_tap_loader import parse_iso_timestamp, format_local_timestamp, format_duration
 
 
 def _to_local_ts(ts_str: str) -> str:
@@ -149,6 +149,11 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
             end_time = messages[-1].get('end_timestamp', messages[-1].get('timestamp', ''))
             lines.append(f"- **Period**: {_to_local_ts(start_time)} - {_to_local_ts(end_time)}")
 
+        # Total AI time
+        total_ms = sum(g.get('duration_ms', 0) or 0 for g in messages)
+        if total_ms > 0:
+            lines.append(f"- **Total AI time**: {format_duration(total_ms)}")
+
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -166,10 +171,14 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
                 # titles_map is 0-indexed, so reference with i-1
                 summary_text = titles_map.get(i - 1, '')
 
+            # Duration display
+            duration_ms = group.get('duration_ms')
+            duration_str = f" ({format_duration(duration_ms)})" if duration_ms is not None else ""
+
             if summary_text:
-                lines.append(f"## {i}. {_to_local_ts(timestamp)} - {summary_text}")
+                lines.append(f"## {i}. {_to_local_ts(timestamp)}{duration_str} - {summary_text}")
             else:
-                lines.append(f"## {i}. {_to_local_ts(timestamp)}")
+                lines.append(f"## {i}. {_to_local_ts(timestamp)}{duration_str}")
             lines.append("")
             lines.append(f"**User instruction**:")
             lines.append("")

@@ -531,6 +531,12 @@
                     <span>{{ session_count }}</span>
                 </div>
                 {% endif %}
+                {% if total_ai_time %}
+                <div class="metadata-item">
+                    <span>⏱ Total AI time:</span>
+                    <span>{{ total_ai_time }}</span>
+                </div>
+                {% endif %}
             </div>
         </header>
 
@@ -601,7 +607,7 @@
                         <div class="message-header">
                             <span class="message-role">🤖 Assistant</span>
                             {% if conversation.assistant_timestamp %}
-                            <span class="message-timestamp">{{ conversation.assistant_timestamp }}</span>
+                            <span class="message-timestamp">{{ conversation.assistant_timestamp }}{% if conversation.duration %} ({{ conversation.duration }}){% endif %}</span>
                             {% endif %}
                         </div>
                         <div class="message-content">

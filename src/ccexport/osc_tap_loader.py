@@ -40,6 +40,19 @@ def format_local_timestamp(ts: datetime, include_seconds: bool = False) -> str:
     return local_ts.strftime('%Y-%m-%dT%H:%M')
 
 
+def format_duration(ms: int) -> str:
+    """Format duration in milliseconds to a human-readable string.
+
+    Examples: 1s, 23s, 1m05s, 12m34s
+    """
+    total_seconds = ms // 1000
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    return f"{minutes}m{seconds:02d}s"
+
+
 def load_osc_logs(titles_dir: Path) -> List[Dict]:
     """Load all osc-tap logs from specified directory"""
     logs = []

@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 
 import mistune
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from .osc_tap_loader import parse_iso_timestamp, format_local_timestamp
+from .osc_tap_loader import parse_iso_timestamp, format_local_timestamp, format_duration
 
 
 class HTMLExtractFormatter:
@@ -87,6 +87,10 @@ class HTMLExtractFormatter:
         # Build unified TOC (merge topics and plans in chronological order)
         unified_toc = self._build_unified_toc(toc_items, plan_toc_items, conversations)
 
+        # Total AI time
+        total_ms = sum(msg.get('duration_ms', 0) or 0 for msg in messages)
+        total_ai_time = format_duration(total_ms) if total_ms > 0 else None
+
         # Load and render template
         template = self.jinja_env.get_template('extract.html.j2')
         html = template.render(
@@ -94,6 +98,7 @@ class HTMLExtractFormatter:
             generated_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             conversation_count=len(conversations),
             session_count=len(session_ids) if session_ids else None,
+            total_ai_time=total_ai_time,
             conversations=conversations,
             unified_toc=unified_toc
         )
@@ -168,13 +173,15 @@ class HTMLExtractFormatter:
                         assistant_timestamp = assistant_msgs[0].get('timestamp', '')
 
                 # Build conversation data
+                duration_ms = msg.get('duration_ms')
                 conversation_data = {
                     'session_id': session_id,
                     'session_change': session_change,
                     'timestamp': self._format_timestamp(timestamp),
                     'user_content': user_html,
                     'assistant_content': assistant_html,
-                    'assistant_timestamp': self._format_timestamp(assistant_timestamp)
+                    'assistant_timestamp': self._format_timestamp(assistant_timestamp),
+                    'duration': format_duration(duration_ms) if duration_ms is not None else None
                 }
 
                 # Process approved plan

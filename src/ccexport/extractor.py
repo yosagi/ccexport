@@ -249,6 +249,36 @@ class MessageExtractor:
 
         return messages
 
+    def _extract_turn_durations(
+        self,
+        dag: SessionDAG,
+        session_id: Optional[str] = None
+    ) -> Dict[str, int]:
+        """
+        Extract turn_duration entries from DAG.
+
+        Args:
+            dag: SessionDAG
+            session_id: Specific session ID (all sessions if omitted)
+
+        Returns:
+            Dict mapping parentUuid -> durationMs
+        """
+        durations = {}
+        for node in dag.nodes.values():
+            if node.type != 'system':
+                continue
+            raw = node.raw_data
+            if raw.get('subtype') != 'turn_duration':
+                continue
+            if session_id and node.session_id != session_id:
+                continue
+            parent_uuid = raw.get('parentUuid')
+            duration_ms = raw.get('durationMs')
+            if parent_uuid and duration_ms is not None:
+                durations[parent_uuid] = duration_ms
+        return durations
+
     def _get_content_key(self, node: MessageNode) -> Tuple[str, int]:
         """
         Get content key from node (for duplicate detection)
@@ -568,6 +598,9 @@ class MessageExtractor:
             apply_preprocessing=True
         )
 
+        # Extract turn_duration map (parentUuid -> durationMs)
+        self._turn_durations = self._extract_turn_durations(dag, session_id)
+
         # Create session list
         sessions = set()
         for msg in all_messages:
@@ -733,6 +766,17 @@ class MessageExtractor:
                 group['end_timestamp'] = group['assistant_messages'][-1].get('timestamp')
             else:
                 group['end_timestamp'] = group['timestamp']
+
+            # Turn duration (from turn_duration system entries)
+            group['duration_ms'] = None
+            turn_durations = getattr(self, '_turn_durations', {})
+            if turn_durations and group['assistant_messages']:
+                # Check each assistant message's uuid against turn_duration parentUuid
+                for assistant_msg in reversed(group['assistant_messages']):
+                    uuid = assistant_msg.get('uuid')
+                    if uuid and uuid in turn_durations:
+                        group['duration_ms'] = turn_durations[uuid]
+                        break
 
         print(f"Grouping complete: {len(messages)} items → {len(grouped_messages)} groups")
         
