@@ -12,6 +12,7 @@ based on uuid/parentUuid.
 
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set, Tuple
@@ -245,6 +246,9 @@ class MessageExtractor:
             # Process message and convert to dictionary format
             msg = self._process_node(node, apply_preprocessing)
             if msg:
+                # Enrich tool_use items in content_items with results from child nodes
+                if msg.get('content_items'):
+                    self._enrich_tool_usages(node, msg['content_items'])
                 messages.append(msg)
 
         return messages
@@ -443,6 +447,128 @@ class MessageExtractor:
         except Exception:
             return None
 
+    @staticmethod
+    def _generate_tool_summary(tool_name: str, tool_input: dict) -> str:
+        """
+        Generate a one-line summary from tool name and input
+
+        Args:
+            tool_name: Tool name (e.g. 'Edit', 'Bash', 'Task')
+            tool_input: Tool input parameters
+
+        Returns:
+            One-line summary string
+        """
+        if tool_name in ('Edit', 'MultiEdit', 'Write', 'Read'):
+            file_path = tool_input.get('file_path', '')
+            return f"{tool_name}: {file_path}"
+        elif tool_name == 'Bash':
+            command = tool_input.get('command', '')
+            if len(command) > 80:
+                command = command[:80] + '...'
+            return f"Bash: {command}"
+        elif tool_name == 'Grep':
+            pattern = tool_input.get('pattern', '')
+            return f"Grep: {pattern}"
+        elif tool_name == 'Glob':
+            pattern = tool_input.get('pattern', '')
+            return f"Glob: {pattern}"
+        elif tool_name == 'WebSearch':
+            query = tool_input.get('query', '')
+            return f"WebSearch: {query}"
+        elif tool_name == 'WebFetch':
+            url = tool_input.get('url', '')
+            return f"WebFetch: {url}"
+        elif tool_name == 'Task':
+            subagent_type = tool_input.get('subagent_type', '')
+            description = tool_input.get('description', '')
+            return f"Task({subagent_type}): {description}"
+        elif tool_name == 'TaskOutput':
+            task_id = tool_input.get('task_id', '')
+            return f"TaskOutput: {task_id}"
+        elif tool_name == 'Skill':
+            skill = tool_input.get('skill', '')
+            return f"Skill: {skill}"
+        elif tool_name == 'NotebookEdit':
+            notebook_path = tool_input.get('notebook_path', '')
+            return f"NotebookEdit: {notebook_path}"
+        else:
+            # MCP tools or others: try to extract a meaningful parameter
+            if tool_input:
+                # Use first string-valued parameter as hint
+                for key in ('name_path_pattern', 'name_path', 'relative_path',
+                            'file_mask', 'substring_pattern', 'command', 'query',
+                            'pattern', 'subject', 'prompt'):
+                    if key in tool_input and isinstance(tool_input[key], str):
+                        val = tool_input[key]
+                        if len(val) > 60:
+                            val = val[:60] + '...'
+                        return f"{tool_name}: {val}"
+            return tool_name
+
+    def _enrich_tool_usages(self, node: MessageNode, content_items: list) -> None:
+        """
+        Enrich tool_use items in content_items with results from child nodes.
+        Modifies content_items in place.
+
+        Args:
+            node: Assistant message node containing tool_use items
+            content_items: Ordered list of content items (text and tool_use)
+        """
+        # Collect tool_result and toolUseResult from child nodes (user messages)
+        tool_results = {}  # tool_use_id -> {content, is_error, structured_result}
+        for child in node.children:
+            child_raw = child.raw_data
+            child_message = child_raw.get('message', {})
+            child_content = child_message.get('content', []) if isinstance(child_message, dict) else []
+
+            # Get toolUseResult from child's raw_data (for Edit patches, etc.)
+            child_tool_use_result = child_raw.get('toolUseResult', {})
+
+            if isinstance(child_content, list):
+                for item in child_content:
+                    if isinstance(item, dict) and item.get('type') == 'tool_result':
+                        tid = item.get('tool_use_id')
+                        if tid:
+                            # Extract text content from tool_result
+                            result_content = ''
+                            raw_content = item.get('content', '')
+                            if isinstance(raw_content, str):
+                                result_content = raw_content
+                            elif isinstance(raw_content, list):
+                                text_parts = []
+                                for part in raw_content:
+                                    if isinstance(part, dict) and part.get('type') == 'text':
+                                        text_parts.append(part.get('text', ''))
+                                result_content = '\n'.join(text_parts)
+
+                            tool_results[tid] = {
+                                'content': result_content,
+                                'is_error': item.get('is_error', False),
+                                'structured_result': child_tool_use_result if isinstance(child_tool_use_result, dict) else {},
+                            }
+
+        # Enrich tool_use items in content_items
+        for ci in content_items:
+            if ci['type'] != 'tool_use':
+                continue
+
+            tool_id = ci['id']
+            tool_name = ci['name']
+            tool_input = ci['input']
+
+            result = tool_results.get(tool_id, {})
+
+            ci['summary'] = self._generate_tool_summary(tool_name, tool_input)
+            ci['tool_result_content'] = result.get('content', '')
+            ci['tool_result_is_error'] = result.get('is_error', False)
+            ci['structured_result'] = result.get('structured_result', {})
+
+            # Subagent info for Task tool
+            if tool_name == 'Task':
+                ci['subagent_type'] = tool_input.get('subagent_type')
+                ci['subagent_id'] = None
+
     def _process_node(
         self,
         node: MessageNode,
@@ -496,24 +622,43 @@ class MessageExtractor:
             if isinstance(message, dict):
                 processed['role'] = message.get('role')
 
-                # Extract text from content array
+                # Extract text and tool_use from content array, preserving order
                 content = message.get('content', [])
                 if isinstance(content, list):
                     text_parts = []
+                    content_items = []  # Ordered list of text/tool_use items
+                    has_tool_use = False
                     for item in content:
                         if isinstance(item, dict):
-                            # Skip tool_use type
+                            # Collect tool_use items (preserve order)
                             if item.get('type') == 'tool_use':
-                                continue
+                                has_tool_use = True
+                                content_items.append({
+                                    'type': 'tool_use',
+                                    'id': item.get('id'),
+                                    'name': item.get('name', ''),
+                                    'input': item.get('input', {}),
+                                })
+                                continue  # Don't include in text
                             # Extract text type
                             elif item.get('type') == 'text':
-                                text_parts.append(item.get('text', ''))
+                                text = item.get('text', '')
+                                text_parts.append(text)
+                                content_items.append({
+                                    'type': 'text',
+                                    'content': text,
+                                })
                             # Skip tool_result type (exclude verbose tool output)
                             # Plan approval info is handled separately in approved_plan field
                             elif item.get('type') == 'tool_result':
                                 continue
 
                     processed['content'] = '\n'.join(text_parts)
+
+                    # Store ordered content items for interleaved display
+                    # Always include content_items (even text-only) for JSON consumers
+                    if content_items:
+                        processed['content_items'] = content_items
                 else:
                     processed['content'] = str(content)
             else:
@@ -523,6 +668,11 @@ class MessageExtractor:
             if processed.get('content'):
                 if apply_preprocessing:
                     processed['content'] = self.preprocess_text(processed['content'])
+                    # Also preprocess text items in content_items
+                    if 'content_items' in processed:
+                        for ci in processed['content_items']:
+                            if ci['type'] == 'text':
+                                ci['content'] = self.preprocess_text(ci['content'])
                     # Keep if plan info, Q&A, or tool rejection comment exists, even if empty after preprocessing
                     if not processed['content'].strip():
                         if processed.get('approved_plan'):
@@ -531,6 +681,9 @@ class MessageExtractor:
                             processed['content'] = self._format_tool_rejection(processed)
                         elif processed.get('qa_answers'):
                             processed['content'] = self._format_qa_answers(processed['qa_answers'])
+                        elif 'content_items' in processed:
+                            # Keep node if it has tool_use even with no text
+                            processed['content'] = ''
                         else:
                             return None
                 elif not processed['content'].strip():
@@ -540,6 +693,8 @@ class MessageExtractor:
                         processed['content'] = self._format_tool_rejection(processed)
                     elif processed.get('qa_answers'):
                         processed['content'] = self._format_qa_answers(processed['qa_answers'])
+                    elif 'content_items' in processed:
+                        processed['content'] = ''
                     else:
                         return None
             else:
@@ -550,13 +705,15 @@ class MessageExtractor:
                     processed['content'] = self._format_tool_rejection(processed)
                 elif processed.get('qa_answers'):
                     processed['content'] = self._format_qa_answers(processed['qa_answers'])
+                elif 'content_items' in processed:
+                    processed['content'] = ''
                 else:
                     return None
 
             return processed
 
         except Exception as e:
-            print(f"Node processing error: {e}")
+            print(f"Node processing error: {e}", file=sys.stderr)
             return None
 
     def extract_project_messages(
@@ -611,7 +768,7 @@ class MessageExtractor:
         if self.config and self.config.merge_continuous_sessions and conversation_group_id:
             all_messages = self._merge_continuous_sessions(all_messages)
 
-        print(f"Extraction complete: {len(all_messages)} messages, {len(sessions)} sessions")
+        print(f"Extraction complete: {len(all_messages)} messages, {len(sessions)} sessions", file=sys.stderr)
 
         return all_messages
 
@@ -640,7 +797,7 @@ class MessageExtractor:
                 if messages:
                     file_data.append({'messages': messages, 'index': 0, 'file': jsonl_file})
             except Exception as e:
-                print(f"File parse error {jsonl_file}: {e}")
+                print(f"File parse error {jsonl_file}: {e}", file=sys.stderr)
                 continue
 
         if not file_data:
@@ -691,7 +848,7 @@ class MessageExtractor:
                 for file_idx, _ in group:
                     file_data[file_idx]['index'] += 1
 
-        print(f"UUID deduplication merge-sort complete: {len(merged_messages)} messages")
+        print(f"UUID deduplication merge-sort complete: {len(merged_messages)} messages", file=sys.stderr)
         return merged_messages
 
     def group_messages_by_user_instruction(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -778,7 +935,19 @@ class MessageExtractor:
                         group['duration_ms'] = turn_durations[uuid]
                         break
 
-        print(f"Grouping complete: {len(messages)} items → {len(grouped_messages)} groups")
+            # Combine content_items from all assistant messages (ordered)
+            combined_items = []
+            tool_count = 0
+            for msg in group['assistant_messages']:
+                for ci in msg.get('content_items', []):
+                    combined_items.append(ci)
+                    if ci['type'] == 'tool_use':
+                        tool_count += 1
+
+            group['combined_content_items'] = combined_items
+            group['tool_usage_count'] = tool_count
+
+        print(f"Grouping complete: {len(messages)} items → {len(grouped_messages)} groups", file=sys.stderr)
         
         return grouped_messages
     
@@ -842,7 +1011,7 @@ class MessageExtractor:
                                 progress.update(task, advance=1)
 
                         except json.JSONDecodeError as e:
-                            import sys; print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
+                            print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
                             progress.update(task, advance=1)
                             continue
             else:
@@ -870,7 +1039,7 @@ class MessageExtractor:
                                 messages.append(processed_msg)
 
                     except json.JSONDecodeError as e:
-                        import sys; print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
+                        print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
                         # Simple implementation: skip error lines
                         continue
 
@@ -1082,7 +1251,7 @@ class MessageExtractor:
             return None
 
         except Exception as e:
-            print(f"Conversation group retrieval error: {e}")
+            print(f"Conversation group retrieval error: {e}", file=sys.stderr)
             return None
     
     def _merge_continuous_sessions(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1122,7 +1291,7 @@ class MessageExtractor:
 
             integrated_messages.append(integrated_msg)
 
-        print(f"Chronological integration complete: integrated {len(messages)} messages")
+        print(f"Chronological integration complete: integrated {len(messages)} messages", file=sys.stderr)
         return integrated_messages
     
     def _should_exclude_continuation_message(self, data: Dict[str, Any]) -> bool:
@@ -1187,7 +1356,7 @@ class MessageExtractor:
             return processed
 
         except Exception as e:
-            print(f"Message processing error: {e}")
+            print(f"Message processing error: {e}", file=sys.stderr)
             return None
     
     def _is_simple_inline_code(self, code_content: str) -> bool:

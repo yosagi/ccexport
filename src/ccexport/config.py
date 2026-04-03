@@ -105,7 +105,7 @@ class Config:
                 config = self._deep_merge(config, file_config)
             except Exception as e:
                 # Simple implementation: error log only
-                print(f"Configuration file load error: {e}")
+                print(f"Configuration file load error: {e}", file=sys.stderr)
         
         return config
     

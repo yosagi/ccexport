@@ -7,7 +7,7 @@ Export Claude Code conversation logs to html/md/org/json.
 ### Install
 
 ```bash
-pipx install git+https://github.com/yosagi/ccexport.git
+uv tool install git+https://github.com/yosagi/ccexport.git
 ```
 
 Or clone and install locally:
@@ -15,7 +15,7 @@ Or clone and install locally:
 ```bash
 git clone https://github.com/yosagi/ccexport.git
 cd ccexport
-pipx install .
+uv tool install .
 ```
 
 ### Usage

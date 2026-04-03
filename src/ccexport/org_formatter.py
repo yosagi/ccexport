@@ -35,7 +35,8 @@ class OrgFormatter:
         messages: List[Dict[str, Any]],
         project_name: str = "Claude Code Export",
         summaries: Optional[List[Dict[str, Any]]] = None,
-        titles_map: Optional[Dict[int, str]] = None
+        titles_map: Optional[Dict[int, str]] = None,
+        detail_level: str = 'normal'
     ) -> str:
         """
         Convert messages to org-mode format
@@ -45,6 +46,7 @@ class OrgFormatter:
             project_name: Project name
             summaries: List of summary entries (for section titles)
             titles_map: Title map from osc-tap (index → title)
+            detail_level: Output detail level ('text', 'normal', 'full')
 
         Returns:
             org-mode format string
@@ -74,7 +76,7 @@ class OrgFormatter:
             if not summary_text and titles_map:
                 # titles_map is 0-indexed, so reference with i-1
                 summary_text = titles_map.get(i - 1, '')
-            lines.extend(self._format_conversation(msg, i, summary_text))
+            lines.extend(self._format_conversation(msg, i, summary_text, detail_level))
 
         return '\n'.join(lines)
 
@@ -250,7 +252,8 @@ class OrgFormatter:
         self,
         msg: Dict[str, Any],
         index: int,
-        summary_text: str = ""
+        summary_text: str = "",
+        detail_level: str = 'normal'
     ) -> List[str]:
         """Convert conversation group to org format"""
         lines = []
@@ -287,19 +290,24 @@ class OrgFormatter:
             lines.extend(self._convert_content(user_content))
         lines.append("")
 
-        # Assistant response
-        assistant_content = msg.get('assistant_combined_content', '')
-        if assistant_content:
-            assistant_timestamp = ''
-            assistant_msgs = msg.get('assistant_messages', [])
-            if assistant_msgs:
-                assistant_timestamp = _to_local_ts(assistant_msgs[0].get('timestamp', ''))
+        # Assistant response with interleaved tool usage
+        assistant_msgs = msg.get('assistant_messages', [])
+        if assistant_msgs:
+            assistant_timestamp = _to_local_ts(assistant_msgs[0].get('timestamp', ''))
 
             # Title is datetime only
             lines.append(f"*** {assistant_timestamp}" if assistant_timestamp else "*** Assistant")
             lines.append("")
-            lines.extend(self._convert_content(assistant_content))
-            lines.append("")
+
+            for assistant_msg in assistant_msgs:
+                content_items = assistant_msg.get('content_items')
+                if content_items and detail_level != 'text':
+                    lines.extend(self._render_content_items_org(content_items, detail_level))
+                else:
+                    content = assistant_msg.get('content', '')
+                    if content.strip():
+                        lines.extend(self._convert_content(content))
+                        lines.append("")
 
         # Approved plan
         if user_msg.get('approved_plan'):
@@ -314,6 +322,155 @@ class OrgFormatter:
             lines.append("")
             lines.extend(self._convert_content(plan_content))
             lines.append("")
+
+        return lines
+
+    def _render_content_items_org(
+        self,
+        content_items: list,
+        detail_level: str
+    ) -> list:
+        """Render content_items (text + tool_use interleaved) as org-mode lines"""
+        lines = []
+        for ci in content_items:
+            if ci['type'] == 'text':
+                text = ci.get('content', '')
+                if text.strip():
+                    lines.extend(self._convert_content(text))
+                    lines.append("")
+            elif ci['type'] == 'tool_use':
+                summary_text = ci.get('summary', ci.get('name', ''))
+                is_error = ci.get('tool_result_is_error', False)
+                error_marker = ' (ERROR)' if is_error else ''
+
+                if detail_level == 'full':
+                    structured = ci.get('structured_result', {})
+                    result_content = ci.get('tool_result_content', '')
+
+                    if structured.get('resultPatch'):
+                        lines.append(f"- 🔧 {summary_text}{error_marker}")
+                        lines.append("#+BEGIN_SRC diff")
+                        for line in structured['resultPatch'].split('\n'):
+                            if line.startswith('*') or line.startswith('#+'):
+                                line = ' ' + line
+                            lines.append(line)
+                        lines.append("#+END_SRC")
+                    elif result_content:
+                        if len(result_content) > 2000:
+                            result_content = result_content[:2000] + '\n... (truncated)'
+                        lines.append(f"- 🔧 {summary_text}{error_marker}")
+                        lines.append("#+BEGIN_EXAMPLE")
+                        for line in result_content.split('\n'):
+                            if line.startswith('*') or line.startswith('#+'):
+                                line = ' ' + line
+                            lines.append(line)
+                        lines.append("#+END_EXAMPLE")
+                    else:
+                        lines.append(f"- 🔧 {summary_text}{error_marker}")
+                else:
+                    # normal mode: compact inline
+                    lines.append(f"- 🔧 {summary_text}{error_marker}")
+                lines.append("")
+        return lines
+
+    def _format_tool_usage_org(
+        self,
+        tool_usages: list,
+        detail_level: str
+    ) -> list:
+        """Format tool usages as org-mode lines (legacy, for grouped display)"""
+        count = len(tool_usages)
+        lines = []
+        lines.append(f"*** Tools used ({count})")
+
+        if detail_level == 'full':
+            for tu in tool_usages:
+                summary_text = tu.get('summary', tu.get('tool_name', ''))
+                is_error = tu.get('tool_result_is_error', False)
+                error_marker = ' (ERROR)' if is_error else ''
+
+                lines.append(f"**** {summary_text}{error_marker}")
+
+                # Show structured result (Edit patch) or result content
+                structured = tu.get('structured_result', {})
+                result_content = tu.get('tool_result_content', '')
+
+                if structured.get('resultPatch'):
+                    lines.append("#+BEGIN_SRC diff")
+                    for line in structured['resultPatch'].split('\n'):
+                        if line.startswith('*') or line.startswith('#+'):
+                            line = ' ' + line
+                        lines.append(line)
+                    lines.append("#+END_SRC")
+                elif result_content:
+                    if len(result_content) > 2000:
+                        result_content = result_content[:2000] + '\n... (truncated)'
+                    lines.append("#+BEGIN_EXAMPLE")
+                    for line in result_content.split('\n'):
+                        if line.startswith('*') or line.startswith('#+'):
+                            line = ' ' + line
+                        lines.append(line)
+                    lines.append("#+END_EXAMPLE")
+        else:
+            # normal mode: simple list
+            for tu in tool_usages:
+                summary_text = tu.get('summary', tu.get('tool_name', ''))
+                is_error = tu.get('tool_result_is_error', False)
+                if is_error:
+                    lines.append(f"- {summary_text} (ERROR)")
+                else:
+                    lines.append(f"- {summary_text}")
+
+        return lines
+
+    def _format_tool_usage_org(
+        self,
+        tool_usages: list,
+        detail_level: str
+    ) -> list:
+        """Format tool usages as org-mode lines"""
+        count = len(tool_usages)
+        lines = []
+        lines.append(f"*** Tools used ({count})")
+
+        if detail_level == 'full':
+            for tu in tool_usages:
+                summary_text = tu.get('summary', tu.get('tool_name', ''))
+                is_error = tu.get('tool_result_is_error', False)
+                error_marker = ' (ERROR)' if is_error else ''
+
+                lines.append(f"**** {summary_text}{error_marker}")
+
+                # Show structured result (Edit patch) or result content
+                structured = tu.get('structured_result', {})
+                result_content = tu.get('tool_result_content', '')
+
+                if structured.get('resultPatch'):
+                    lines.append("#+BEGIN_SRC diff")
+                    for line in structured['resultPatch'].split('\n'):
+                        # Escape org-mode special characters at beginning of line
+                        if line.startswith('*') or line.startswith('#+'):
+                            line = ' ' + line
+                        lines.append(line)
+                    lines.append("#+END_SRC")
+                elif result_content:
+                    if len(result_content) > 2000:
+                        result_content = result_content[:2000] + '\n... (truncated)'
+                    lines.append("#+BEGIN_EXAMPLE")
+                    for line in result_content.split('\n'):
+                        if line.startswith('*') or line.startswith('#+'):
+                            line = ' ' + line
+                        lines.append(line)
+                    lines.append("#+END_EXAMPLE")
+        else:
+            # normal mode: simple list
+            for tu in tool_usages:
+                summary_text = tu.get('summary', tu.get('tool_name', ''))
+                is_error = tu.get('tool_result_is_error', False)
+                if is_error:
+                    lines.append(f"- {summary_text} (ERROR)")
+                else:
+                    lines.append(f"- {summary_text}")
 
         return lines
 

@@ -10,6 +10,7 @@ Designed to be invoked non-interactively from the work-logger skill.
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,13 +34,17 @@ def cli():
 @click.option('--format', '-f', 'output_format', required=True,
               type=click.Choice(['html', 'md', 'org', 'json']), help='Output format')
 @click.option('--project', '-p', default=None, help='Project name (auto-detect if omitted)')
+@click.option('--detail', '-d', 'detail_level',
+              type=click.Choice(['text', 'normal', 'full']),
+              default='normal',
+              help='Output detail level (text=no tools, normal=tool summaries, full=tool I/O)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose logging')
 @click.option('--config-file', type=click.Path(exists=True), help='Config file path')
 @click.option('--titles-dir', type=click.Path(exists=True),
               help='osc-tap log directory (for title display)')
 def export(session: str, output: str, output_format: str,
-           project: Optional[str], verbose: bool, config_file: Optional[str],
-           titles_dir: Optional[str]):
+           project: Optional[str], detail_level: str, verbose: bool,
+           config_file: Optional[str], titles_dir: Optional[str]):
     """Export conversation by specifying session ID"""
 
     def debug(msg: str):
@@ -126,7 +131,8 @@ def export(session: str, output: str, output_format: str,
     # 5. Format conversion
     t0 = time.time()
     output_path = Path(output)
-    content = _format_messages(messages, project_name, output_format, config, summaries, titles_map)
+    content = _format_messages(messages, project_name, output_format, config,
+                               summaries, titles_map, detail_level)
     debug(f"Format conversion ({output_format}): {time.time() - t0:.3f}s")
 
     # 6. Write to file
@@ -228,8 +234,39 @@ def session_info(session: str, as_json: bool, config_file: Optional[str]):
 DEFAULT_NAME_TEMPLATE = "{project}_{date}_{session}.{ext}"
 
 
+def _compute_logical_date(iso_timestamp: str, boundary_hour: int, boundary_minute: int) -> str:
+    """Compute logical date from a timestamp with day boundary offset.
+
+    If the local time is before the boundary (e.g. 03:00), the date is
+    shifted back by one day. This matches work-logger's behavior where
+    late-night sessions belong to the previous day.
+
+    Args:
+        iso_timestamp: ISO 8601 timestamp string (e.g. "2026-02-27T01:30:00+09:00")
+        boundary_hour: Hour of day boundary (0-23)
+        boundary_minute: Minute of day boundary (0-59)
+
+    Returns:
+        Date string in YYYY-MM-DD format
+    """
+    from .osc_tap_loader import to_local_time
+
+    ts = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    local_ts = to_local_time(ts)
+
+    if local_ts.hour < boundary_hour or (
+        local_ts.hour == boundary_hour and local_ts.minute < boundary_minute
+    ):
+        local_ts = local_ts.replace(hour=0, minute=0) - timedelta(days=1)
+
+    return local_ts.strftime('%Y-%m-%d')
+
+
 @cli.command()
-@click.option('--project', '-p', required=True, help='Project name')
+@click.option('--project', '-p', required=True, multiple=True,
+              help='Project name (can be specified multiple times)')
 @click.option('--output', '-o', required=True, type=click.Path(),
               help='Output directory')
 @click.option('--format', '-f', 'output_format', required=True,
@@ -240,42 +277,65 @@ DEFAULT_NAME_TEMPLATE = "{project}_{date}_{session}.{ext}"
 @click.option('--name-template', default=None,
               help=f'Filename template (default: {DEFAULT_NAME_TEMPLATE}). '
                    'Variables: {project}, {date}, {session}, {ext}')
+@click.option('--detail', '-d', 'detail_level',
+              type=click.Choice(['text', 'normal', 'full']),
+              default='normal',
+              help='Output detail level (text=no tools, normal=tool summaries, full=tool I/O)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose logging')
 @click.option('--config-file', type=click.Path(exists=True),
               help='Config file path')
 @click.option('--titles-dir', type=click.Path(exists=True),
               help='osc-tap log directory (for title display)')
-def batch(project: str, output: str, output_format: str,
+@click.option('--day-boundary', default='00:00',
+              help='Day boundary time in HH:MM (default: 00:00). '
+                   'Sessions ending before this time use the previous date.')
+def batch(project: tuple[str, ...], output: str, output_format: str,
           since: Optional[str], name_template: Optional[str],
+          detail_level: str,
           verbose: bool, config_file: Optional[str],
-          titles_dir: Optional[str]):
-    """Batch export all sessions in a project"""
+          titles_dir: Optional[str], day_boundary: str):
+    """Batch export all sessions in a project (multiple projects supported)"""
     total_start = time.time()
+
+    # Parse day boundary
+    try:
+        parts = day_boundary.split(':')
+        boundary_hour = int(parts[0])
+        boundary_minute = int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, IndexError):
+        click.echo(f"Invalid --day-boundary format: {day_boundary} (expected HH:MM)", err=True)
+        sys.exit(1)
 
     # Load configuration
     config = Config(config_file=config_file, verbose=verbose)
     extractor = MessageExtractor(config.projects_dir, config)
 
-    # Get all sessions for the project
-    try:
-        session_list = extractor.get_session_info(project)
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+    # Collect sessions from all specified projects
+    all_sessions: list[tuple[str, dict]] = []  # (project_name, session_info)
+    for proj in project:
+        try:
+            session_list = extractor.get_session_info(proj)
+        except FileNotFoundError as e:
+            click.echo(f"Warning: {e} (skipping)", err=True)
+            continue
 
-    if not session_list:
-        click.echo(f"No sessions found for project: {project}", err=True)
-        sys.exit(1)
-
-    # Filter by --since
-    if since:
-        session_list = [
-            s for s in session_list
-            if (s.get('start_time') or '') >= since
-        ]
         if not session_list:
-            click.echo(f"No sessions found since {since}", err=True)
-            sys.exit(1)
+            click.echo(f"No sessions found for project: {proj} (skipping)", err=True)
+            continue
+
+        # Filter by --since
+        if since:
+            session_list = [
+                s for s in session_list
+                if (s.get('start_time') or '') >= since
+            ]
+
+        for s in session_list:
+            all_sessions.append((proj, s))
+
+    if not all_sessions:
+        click.echo("No sessions found for any specified project", err=True)
+        sys.exit(1)
 
     # Prepare output directory
     output_dir = Path(output)
@@ -285,39 +345,44 @@ def batch(project: str, output: str, output_format: str,
     template = name_template or DEFAULT_NAME_TEMPLATE
     titles_path = Path(titles_dir) if titles_dir else None
 
-    # Use basename of project path for filename (avoid absolute path in filename)
-    project_name = Path(project).name
-
     # Export each session
     exported = 0
     failed = 0
-    total = len(session_list)
+    total = len(all_sessions)
 
-    for i, session in enumerate(session_list, 1):
+    for i, (proj, session) in enumerate(all_sessions, 1):
         session_id = session['session_id']
-        start_date = (session.get('start_time') or '')[:10] or 'unknown'
+        end_time = session.get('end_time') or session.get('start_time') or ''
+        if end_time:
+            logical_date = _compute_logical_date(end_time, boundary_hour, boundary_minute)
+        else:
+            logical_date = 'unknown'
         short_id = session_id[:8]
+
+        # Use basename of project path for filename (avoid absolute path in filename)
+        project_name = Path(proj).name
 
         filename = template.format(
             project=project_name,
-            date=start_date,
+            date=logical_date,
             session=short_id,
             ext=output_format,
         )
         output_path = output_dir / filename
 
-        click.echo(f"[{i}/{total}] Exporting {short_id} ... {filename}", err=True)
+        click.echo(f"[{i}/{total}] Exporting {project_name}/{short_id} ... {filename}", err=True)
 
         try:
             _export_single_session(
                 extractor=extractor,
-                project_name=project,
+                project_name=proj,
                 session_id=session_id,
                 output_path=output_path,
                 output_format=output_format,
                 config=config,
                 titles_dir=titles_path,
                 verbose=verbose,
+                detail_level=detail_level,
             )
             exported += 1
         except Exception as e:
@@ -326,7 +391,8 @@ def batch(project: str, output: str, output_format: str,
 
     # Summary
     elapsed = time.time() - total_start
-    summary = f"Done: {exported}/{total} sessions exported"
+    projects_str = ", ".join(Path(p).name for p in project)
+    summary = f"Done: {exported}/{total} sessions exported from [{projects_str}]"
     if failed:
         summary += f" ({failed} failed)"
     summary += f" [{elapsed:.1f}s]"
@@ -342,6 +408,7 @@ def _export_single_session(
     config: Config,
     titles_dir: Optional[Path] = None,
     verbose: bool = False,
+    detail_level: str = 'normal',
 ) -> None:
     """Export a single session to a file.
 
@@ -385,7 +452,7 @@ def _export_single_session(
     # Format and write
     content = _format_messages(
         messages, project_name, output_format, config,
-        all_summaries, titles_map
+        all_summaries, titles_map, detail_level
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -395,7 +462,8 @@ def _export_single_session(
 def _format_messages(messages: list, project_name: str,
                     output_format: str, config: Config,
                     summaries: list = None,
-                    titles_map: dict = None) -> str:
+                    titles_map: dict = None,
+                    detail_level: str = 'normal') -> str:
     """Format messages"""
     if titles_map is None:
         titles_map = {}
@@ -408,17 +476,20 @@ def _format_messages(messages: list, project_name: str,
             collapse_code_blocks=True,
             min_lines_to_collapse=10,
             summaries=summaries,
-            titles_map=titles_map
+            titles_map=titles_map,
+            detail_level=detail_level
         )
     elif output_format == 'md':
         from .md_formatter import format_as_markdown
         return format_as_markdown(messages, project_name, grouped=True,
-                                  summaries=summaries, titles_map=titles_map)
+                                  summaries=summaries, titles_map=titles_map,
+                                  detail_level=detail_level)
     elif output_format == 'org':
         from .org_formatter import OrgFormatter
         formatter = OrgFormatter(config)
         return formatter.format_extract(messages, project_name,
-                                        summaries=summaries, titles_map=titles_map)
+                                        summaries=summaries, titles_map=titles_map,
+                                        detail_level=detail_level)
     elif output_format == 'json':
         output = {
             'project_name': project_name,

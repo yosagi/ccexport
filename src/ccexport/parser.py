@@ -10,6 +10,7 @@ Reference: https://piebald.ai/blog/messages-as-commits-claude-codes-git-like-dag
 """
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Set
@@ -161,7 +162,7 @@ class SessionParser:
                 all_nodes.extend(nodes)
                 all_summaries.extend(summaries)
             except Exception as e:
-                print(f"File parse error {jsonl_file}: {e}")
+                print(f"File parse error {jsonl_file}: {e}", file=sys.stderr)
                 continue
 
         return self._build_dag(all_nodes, all_summaries)
@@ -214,7 +215,7 @@ class SessionParser:
                     # Ignore other types (e.g., file-history-snapshot)
 
                 except json.JSONDecodeError as e:
-                    import sys; print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
+                    print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
                     continue
 
         return nodes, summaries

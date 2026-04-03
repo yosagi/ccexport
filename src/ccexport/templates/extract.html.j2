@@ -510,6 +510,45 @@
             margin: 0;
             color: #795548;
         }
+
+        /* Inline tool usage (interleaved with assistant text) */
+        .tool-inline {
+            margin: 0.5rem 0;
+            padding: 0.3rem 0.6rem;
+            font-size: 0.85rem;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+            color: #586069;
+            background: #f1f3f5;
+            border-radius: 4px;
+            border-left: 3px solid #adb5bd;
+        }
+        .tool-inline.tool-error {
+            border-left-color: #cb2431;
+            color: #cb2431;
+        }
+        details.tool-inline {
+            cursor: default;
+        }
+        details.tool-inline > summary {
+            cursor: pointer;
+            padding: 0.3rem 0;
+            font-size: 0.85rem;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+        }
+        .tool-error-marker {
+            font-size: 0.8em;
+        }
+        .tool-result, .tool-result-diff {
+            margin: 0.25rem 0 0 0;
+            padding: 0.5rem;
+            font-size: 0.8rem;
+            background: var(--code-bg);
+            border: 1px solid #eaecef;
+            border-radius: 4px;
+            overflow-x: auto;
+            max-height: 300px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>

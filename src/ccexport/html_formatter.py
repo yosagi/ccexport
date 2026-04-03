@@ -41,7 +41,8 @@ class HTMLExtractFormatter:
         collapse_code_blocks: bool = True,
         min_lines_to_collapse: int = 10,
         summaries: Optional[List[Dict[str, Any]]] = None,
-        titles_map: Optional[Dict[int, str]] = None
+        titles_map: Optional[Dict[int, str]] = None,
+        detail_level: str = 'normal'
     ) -> str:
         """
         Format extracted messages into HTML
@@ -53,13 +54,14 @@ class HTMLExtractFormatter:
             min_lines_to_collapse: Minimum number of lines to collapse
             summaries: List of summary entries (for TOC generation)
             titles_map: Title map from osc-tap (index → title)
+            detail_level: Output detail level ('text', 'normal', 'full')
 
         Returns:
             HTML string
         """
         # Prepare conversation data
         conversations = self._prepare_conversations(
-            messages, collapse_code_blocks, min_lines_to_collapse
+            messages, collapse_code_blocks, min_lines_to_collapse, detail_level
         )
 
         # Count session IDs
@@ -109,7 +111,8 @@ class HTMLExtractFormatter:
         self,
         messages: List[Dict[str, Any]],
         collapse_code_blocks: bool,
-        min_lines_to_collapse: int
+        min_lines_to_collapse: int,
+        detail_level: str = 'normal'
     ) -> List[Dict[str, Any]]:
         """
         Format messages into conversation format
@@ -118,6 +121,7 @@ class HTMLExtractFormatter:
             messages: Raw message list
             collapse_code_blocks: Whether to collapse code blocks
             min_lines_to_collapse: Minimum lines to collapse
+            detail_level: Output detail level ('text', 'normal', 'full')
 
         Returns:
             List of conversation data
@@ -136,10 +140,6 @@ class HTMLExtractFormatter:
                 # Detect session change
                 session_change = session_id and session_id != previous_session_id
                 previous_session_id = session_id
-
-                # Get assistant message
-                assistant_content = msg.get('assistant_combined_content', '')
-                assistant_timestamp = ''
 
                 # Detect and process skill invocation
                 is_skill = msg.get('is_skill_invocation', False)
@@ -162,15 +162,32 @@ class HTMLExtractFormatter:
                         user_content, collapse_code_blocks, min_lines_to_collapse
                     )
 
+                # Build assistant content with interleaved tool usage
                 assistant_html = ''
-                if assistant_content:
-                    assistant_html = self._convert_markdown_to_html(
-                        assistant_content, collapse_code_blocks, min_lines_to_collapse
-                    )
-                    # Assistant timestamp (obtained from first message)
-                    assistant_msgs = msg.get('assistant_messages', [])
-                    if assistant_msgs:
-                        assistant_timestamp = assistant_msgs[0].get('timestamp', '')
+                assistant_timestamp = ''
+                assistant_msgs = msg.get('assistant_messages', [])
+
+                if assistant_msgs:
+                    assistant_timestamp = assistant_msgs[0].get('timestamp', '')
+
+                    html_parts = []
+                    for assistant_msg in assistant_msgs:
+                        content_items = assistant_msg.get('content_items')
+                        if content_items and detail_level != 'text':
+                            # Render interleaved content
+                            html_parts.append(self._render_content_items_html(
+                                content_items, detail_level,
+                                collapse_code_blocks, min_lines_to_collapse
+                            ))
+                        else:
+                            # Text-only
+                            content = assistant_msg.get('content', '')
+                            if content.strip():
+                                html_parts.append(self._convert_markdown_to_html(
+                                    content, collapse_code_blocks, min_lines_to_collapse
+                                ))
+
+                    assistant_html = '\n'.join(html_parts)
 
                 # Build conversation data
                 duration_ms = msg.get('duration_ms')
@@ -201,6 +218,105 @@ class HTMLExtractFormatter:
                 conversations.append(conversation_data)
 
         return conversations
+
+    def _render_content_items_html(
+        self,
+        content_items: list,
+        detail_level: str,
+        collapse_code_blocks: bool,
+        min_lines_to_collapse: int
+    ) -> str:
+        """Render content_items (text + tool_use interleaved) as HTML"""
+        import html as html_module
+        parts = []
+
+        for ci in content_items:
+            if ci['type'] == 'text':
+                text = ci.get('content', '')
+                if text.strip():
+                    parts.append(self._convert_markdown_to_html(
+                        text, collapse_code_blocks, min_lines_to_collapse
+                    ))
+            elif ci['type'] == 'tool_use':
+                summary_text = html_module.escape(ci.get('summary', ci.get('name', '')))
+                is_error = ci.get('tool_result_is_error', False)
+                error_class = ' tool-error' if is_error else ''
+                error_marker = ' <span class="tool-error-marker">❌</span>' if is_error else ''
+
+                if detail_level == 'full':
+                    structured = ci.get('structured_result', {})
+                    result_content = ci.get('tool_result_content', '')
+
+                    if structured.get('resultPatch') or result_content:
+                        parts.append(f'<details class="tool-inline{error_class}">')
+                        parts.append(f'<summary>🔧 {summary_text}{error_marker}</summary>')
+
+                        if structured.get('resultPatch'):
+                            patch = html_module.escape(structured['resultPatch'])
+                            parts.append(f'<pre class="tool-result-diff">{patch}</pre>')
+                        elif result_content:
+                            if len(result_content) > 2000:
+                                result_content = result_content[:2000] + '\n... (truncated)'
+                            parts.append(f'<pre class="tool-result">{html_module.escape(result_content)}</pre>')
+
+                        parts.append('</details>')
+                    else:
+                        parts.append(f'<div class="tool-inline{error_class}">🔧 {summary_text}{error_marker}</div>')
+                else:
+                    # normal mode: compact inline display
+                    parts.append(f'<div class="tool-inline{error_class}">🔧 {summary_text}{error_marker}</div>')
+
+        return '\n'.join(parts)
+
+    def _format_tool_usage_html(
+        self,
+        tool_usages: list,
+        detail_level: str
+    ) -> str:
+        """Format tool usages as HTML"""
+        import html as html_module
+        count = len(tool_usages)
+        parts = [f'<details class="tool-usage">']
+        parts.append(f'<summary>Tools used ({count})</summary>')
+
+        if detail_level == 'full':
+            parts.append('<div class="tool-usage-list">')
+            for tu in tool_usages:
+                summary_text = html_module.escape(tu.get('summary', tu.get('tool_name', '')))
+                is_error = tu.get('tool_result_is_error', False)
+                error_class = ' tool-error' if is_error else ''
+                parts.append(f'<details class="tool-detail{error_class}">')
+                parts.append(f'<summary>{summary_text}</summary>')
+
+                # Show structured result (Edit patch) or result content
+                structured = tu.get('structured_result', {})
+                result_content = tu.get('tool_result_content', '')
+
+                if structured.get('resultPatch'):
+                    patch = html_module.escape(structured['resultPatch'])
+                    parts.append(f'<pre class="tool-result-diff">{patch}</pre>')
+                elif result_content:
+                    # Truncate long results
+                    if len(result_content) > 2000:
+                        result_content = result_content[:2000] + '\n... (truncated)'
+                    parts.append(f'<pre class="tool-result">{html_module.escape(result_content)}</pre>')
+
+                parts.append('</details>')
+            parts.append('</div>')
+        else:
+            # normal mode: simple list
+            parts.append('<ul>')
+            for tu in tool_usages:
+                summary_text = html_module.escape(tu.get('summary', tu.get('tool_name', '')))
+                is_error = tu.get('tool_result_is_error', False)
+                if is_error:
+                    parts.append(f'<li class="tool-error">{summary_text} (error)</li>')
+                else:
+                    parts.append(f'<li>{summary_text}</li>')
+            parts.append('</ul>')
+
+        parts.append('</details>')
+        return '\n'.join(parts)
 
     def _convert_markdown_to_html(
         self,

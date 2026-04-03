@@ -102,7 +102,8 @@ def _offset_markdown_header(line: str) -> str:
 
 
 def format_as_markdown(messages: list, project_name: str, grouped: bool,
-                       summaries: list = None, titles_map: dict = None) -> str:
+                       summaries: list = None, titles_map: dict = None,
+                       detail_level: str = 'normal') -> str:
     """
     Format extracted messages in Markdown format
 
@@ -112,6 +113,7 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
         grouped: Whether messages are grouped
         summaries: List of summary entries (optional)
         titles_map: Title map from osc-tap (index → title, optional)
+        detail_level: Output detail level ('text', 'normal', 'full')
 
     Returns:
         Markdown format string
@@ -199,16 +201,20 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
                 lines.append("**Assistant response**:")
                 lines.append("")
                 for j, assistant_msg in enumerate(group['assistant_messages'], 1):
-                    # Display full content (no truncation)
-                    content = assistant_msg.get('content', '')
                     timestamp_detail = assistant_msg.get('timestamp', '')
 
                     lines.append(f"### {j}. {_to_local_ts(timestamp_detail)}")
                     lines.append("")
-                    # Format content appropriately in Markdown
-                    # Offset headers in responses to level 4 or lower
-                    for content_line in content.split('\n'):
-                        lines.append(_offset_markdown_header(content_line))
+
+                    # Render content with interleaved tool usage
+                    content_items = assistant_msg.get('content_items')
+                    if content_items and detail_level != 'text':
+                        lines.extend(_render_content_items_md(content_items, detail_level))
+                    else:
+                        # Text-only mode or no content_items
+                        content = assistant_msg.get('content', '')
+                        for content_line in content.split('\n'):
+                            lines.append(_offset_markdown_header(content_line))
                     lines.append("")
                 lines.append("")
 
@@ -282,3 +288,140 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
             lines.append("")
 
     return '\n'.join(lines)
+
+
+def _render_content_items_md(content_items: list, detail_level: str) -> list:
+    """Render content_items (text + tool_use interleaved) as Markdown lines"""
+    lines = []
+    for ci in content_items:
+        if ci['type'] == 'text':
+            text = ci.get('content', '')
+            if text.strip():
+                for content_line in text.split('\n'):
+                    lines.append(_offset_markdown_header(content_line))
+                lines.append("")
+        elif ci['type'] == 'tool_use':
+            summary_text = ci.get('summary', ci.get('name', ''))
+            is_error = ci.get('tool_result_is_error', False)
+            error_marker = ' ❌' if is_error else ''
+
+            if detail_level == 'full':
+                # Show tool detail with result
+                structured = ci.get('structured_result', {})
+                result_content = ci.get('tool_result_content', '')
+
+                if structured.get('resultPatch'):
+                    lines.append(f"<details><summary>🔧 <code>{summary_text}</code>{error_marker}</summary>")
+                    lines.append("")
+                    lines.append("```diff")
+                    lines.append(structured['resultPatch'])
+                    lines.append("```")
+                    lines.append("</details>")
+                elif result_content:
+                    if len(result_content) > 2000:
+                        result_content = result_content[:2000] + '\n... (truncated)'
+                    lines.append(f"<details><summary>🔧 <code>{summary_text}</code>{error_marker}</summary>")
+                    lines.append("")
+                    lines.append("```")
+                    lines.append(result_content)
+                    lines.append("```")
+                    lines.append("</details>")
+                else:
+                    lines.append(f"🔧 `{summary_text}`{error_marker}")
+            else:
+                # normal mode: compact inline display
+                lines.append(f"🔧 `{summary_text}`{error_marker}")
+            lines.append("")
+    return lines
+
+
+def _format_tool_usage_md(tool_usages: list, detail_level: str) -> list:
+    """Format tool usages as Markdown lines (legacy, for grouped display)"""
+    count = len(tool_usages)
+    lines = []
+    lines.append("<details>")
+    lines.append(f"<summary>Tools used ({count})</summary>")
+    lines.append("")
+
+    if detail_level == 'full':
+        for tu in tool_usages:
+            summary_text = tu.get('summary', tu.get('tool_name', ''))
+            is_error = tu.get('tool_result_is_error', False)
+            error_marker = ' **(error)**' if is_error else ''
+
+            lines.append(f"**{summary_text}**{error_marker}")
+
+            # Show structured result (Edit patch) or result content
+            structured = tu.get('structured_result', {})
+            result_content = tu.get('tool_result_content', '')
+
+            if structured.get('resultPatch'):
+                lines.append("```diff")
+                lines.append(structured['resultPatch'])
+                lines.append("```")
+            elif result_content:
+                if len(result_content) > 2000:
+                    result_content = result_content[:2000] + '\n... (truncated)'
+                lines.append("```")
+                lines.append(result_content)
+                lines.append("```")
+            lines.append("")
+    else:
+        # normal mode: simple list
+        for tu in tool_usages:
+            summary_text = tu.get('summary', tu.get('tool_name', ''))
+            is_error = tu.get('tool_result_is_error', False)
+            if is_error:
+                lines.append(f"- `{summary_text}` (error)")
+            else:
+                lines.append(f"- `{summary_text}`")
+        lines.append("")
+
+    lines.append("</details>")
+    return lines
+
+
+def _format_tool_usage_md(tool_usages: list, detail_level: str) -> list:
+    """Format tool usages as Markdown lines"""
+    count = len(tool_usages)
+    lines = []
+    lines.append("<details>")
+    lines.append(f"<summary>Tools used ({count})</summary>")
+    lines.append("")
+
+    if detail_level == 'full':
+        for tu in tool_usages:
+            summary_text = tu.get('summary', tu.get('tool_name', ''))
+            is_error = tu.get('tool_result_is_error', False)
+            error_marker = ' **(error)**' if is_error else ''
+
+            lines.append(f"**{summary_text}**{error_marker}")
+
+            # Show structured result (Edit patch) or result content
+            structured = tu.get('structured_result', {})
+            result_content = tu.get('tool_result_content', '')
+
+            if structured.get('resultPatch'):
+                lines.append("```diff")
+                lines.append(structured['resultPatch'])
+                lines.append("```")
+            elif result_content:
+                if len(result_content) > 2000:
+                    result_content = result_content[:2000] + '\n... (truncated)'
+                lines.append("```")
+                lines.append(result_content)
+                lines.append("```")
+            lines.append("")
+    else:
+        # normal mode: simple list
+        for tu in tool_usages:
+            summary_text = tu.get('summary', tu.get('tool_name', ''))
+            is_error = tu.get('tool_result_is_error', False)
+            if is_error:
+                lines.append(f"- `{summary_text}` (error)")
+            else:
+                lines.append(f"- `{summary_text}`")
+        lines.append("")
+
+    lines.append("</details>")
+    return lines
