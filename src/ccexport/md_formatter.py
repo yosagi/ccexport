@@ -6,7 +6,9 @@ Markdown formatter
 Format extracted messages in Markdown format
 """
 
+import base64
 from datetime import datetime
+from pathlib import Path
 from .osc_tap_loader import parse_iso_timestamp, format_local_timestamp, format_duration
 
 
@@ -101,9 +103,33 @@ def _offset_markdown_header(line: str) -> str:
     return '#' * new_level + line[level:]
 
 
+def _save_image(data: str, media_type: str, images_dir: Path, counter: list,
+                original_filename: str = None) -> str:
+    """Save base64 image to file and return relative path"""
+    counter[0] += 1
+    if original_filename:
+        filename = original_filename
+        # Avoid overwriting: add counter suffix if file exists
+        filepath = images_dir / filename
+        if filepath.exists():
+            stem = filepath.stem
+            ext = filepath.suffix
+            filename = f"{stem}_{counter[0]:03d}{ext}"
+    else:
+        ext = media_type.split('/')[-1] if '/' in media_type else 'png'
+        if ext == 'jpeg':
+            ext = 'jpg'
+        filename = f"img_{counter[0]:03d}.{ext}"
+    filepath = images_dir / filename
+    images_dir.mkdir(parents=True, exist_ok=True)
+    filepath.write_bytes(base64.b64decode(data))
+    return f"{images_dir.name}/{filename}"
+
+
 def format_as_markdown(messages: list, project_name: str, grouped: bool,
                        summaries: list = None, titles_map: dict = None,
-                       detail_level: str = 'normal') -> str:
+                       detail_level: str = 'normal',
+                       output_path: Path = None) -> str:
     """
     Format extracted messages in Markdown format
 
@@ -114,6 +140,7 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
         summaries: List of summary entries (optional)
         titles_map: Title map from osc-tap (index → title, optional)
         detail_level: Output detail level ('text', 'normal', 'full')
+        output_path: Output file path (for saving images alongside)
 
     Returns:
         Markdown format string
@@ -121,6 +148,13 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
     summary_map = _build_summary_map(messages, summaries)
     if titles_map is None:
         titles_map = {}
+
+    # Image saving setup
+    images_dir = None
+    image_counter = [0]  # mutable counter
+    if output_path:
+        output_path = Path(output_path)
+        images_dir = output_path.parent / f"{output_path.stem}_images"
 
     lines = []
 
@@ -189,9 +223,26 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
                 skill_name = group.get('skill_name', 'unknown')
                 lines.append(f"> [Skill: {skill_name} invoked]")
             else:
-                # Display user instruction as quote
-                for line in user_content.split('\n'):
-                    lines.append(f"> {line}")
+                # Display user instruction as quote, with images if present
+                user_content_items = user_msg.get('content_items', [])
+                has_images = images_dir and any(
+                    ci.get('type') == 'image' for ci in user_content_items
+                )
+                if has_images:
+                    for ci in user_content_items:
+                        if ci.get('type') == 'text':
+                            for line in ci.get('content', '').split('\n'):
+                                lines.append(f"> {line}")
+                        elif ci.get('type') == 'image':
+                            rel_path = _save_image(
+                                ci['data'], ci.get('media_type', 'image/png'),
+                                images_dir, image_counter,
+                                ci.get('filename')
+                            )
+                            lines.append(f"> ![Image]({rel_path})")
+                else:
+                    for line in user_content.split('\n'):
+                        lines.append(f"> {line}")
             lines.append("")
             lines.append(f"**Assistant responses**: {assistant_count}")
             lines.append("")

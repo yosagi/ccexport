@@ -648,6 +648,15 @@ class MessageExtractor:
                                     'type': 'text',
                                     'content': text,
                                 })
+                            # Extract image type (base64 embedded images)
+                            elif item.get('type') == 'image':
+                                source = item.get('source', {})
+                                if source.get('type') == 'base64' and source.get('data'):
+                                    content_items.append({
+                                        'type': 'image',
+                                        'media_type': source.get('media_type', 'image/png'),
+                                        'data': source.get('data'),
+                                    })
                             # Skip tool_result type (exclude verbose tool output)
                             # Plan approval info is handled separately in approved_plan field
                             elif item.get('type') == 'tool_result':
@@ -851,6 +860,43 @@ class MessageExtractor:
         print(f"UUID deduplication merge-sort complete: {len(merged_messages)} messages", file=sys.stderr)
         return merged_messages
 
+    def _enrich_image_filenames(self, grouped_messages: List[Dict[str, Any]]) -> None:
+        """
+        Enrich image content_items with filenames from adjacent path-reference groups.
+
+        Claude Code stores images in two consecutive user messages:
+        1. Base64 data message with [Image #N] text
+        2. Path reference message with [Image: source: /path/to/file.png] text
+
+        This method finds pairs and adds 'filename' to image content_items.
+        Modifies grouped_messages in place.
+        """
+        import re
+        path_pattern = re.compile(r'\[Image: source: (.+?)\]')
+
+        for i in range(len(grouped_messages) - 1):
+            group = grouped_messages[i]
+            next_group = grouped_messages[i + 1]
+
+            # Check if current group has images
+            user_msg = group.get('user_message', {})
+            content_items = user_msg.get('content_items', [])
+            images = [ci for ci in content_items if ci.get('type') == 'image']
+            if not images:
+                continue
+
+            # Check if next group has path references
+            next_user_msg = next_group.get('user_message', {})
+            next_content = next_user_msg.get('content', '')
+            filenames = path_pattern.findall(next_content)
+            if not filenames:
+                continue
+
+            # Match images with filenames by order
+            for img, filepath in zip(images, filenames):
+                img['filename'] = filepath.rsplit('/', 1)[-1] if '/' in filepath else filepath
+                img['source_path'] = filepath
+
     def group_messages_by_user_instruction(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Group messages by user instruction
@@ -947,101 +993,43 @@ class MessageExtractor:
             group['combined_content_items'] = combined_items
             group['tool_usage_count'] = tool_count
 
+        # Enrich image content_items with filenames from adjacent path-reference groups
+        self._enrich_image_filenames(grouped_messages)
+
         print(f"Grouping complete: {len(messages)} items → {len(grouped_messages)} groups", file=sys.stderr)
-        
+
         return grouped_messages
     
     def _parse_jsonl_file(self, file_path: Path, skip_preprocessing: bool = False) -> List[Dict[str, Any]]:
         """Parse JSONL file and extract messages"""
-        from rich.console import Console
-        from rich.progress import Progress, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
-
-        console = Console()
         messages = []
 
-        # Get total line count in file (for progress bar)
         with open(file_path, 'r', encoding='utf-8') as f:
-            total_lines = sum(1 for _ in f)
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
 
-        # Check if code block summarization is enabled
-        # ccexport defaults to 'keep' (no LLM summarization)
-        code_block_handling = self.config.code_block_handling if self.config else 'keep'
-        show_progress = (code_block_handling == 'summarize' and not skip_preprocessing)
+                try:
+                    data = json.loads(line)
 
-        if show_progress:
-            console.print(f"[cyan]Processing {file_path.name} (with code block summarization)[/cyan]")
-
-        with open(file_path, 'r', encoding='utf-8') as f:
-            if show_progress:
-                with Progress(
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    MofNCompleteColumn(),
-                    TimeElapsedColumn(),
-                    console=console
-                ) as progress:
-                    task = progress.add_task(f"Processing messages...", total=total_lines)
-
-                    for line_num, line in enumerate(f, 1):
-                        line = line.strip()
-                        if not line:
-                            progress.update(task, advance=1)
-                            continue
-
-                        try:
-                            data = json.loads(line)
-
-                            # Exclude summary type
-                            if data.get('type') == 'summary':
-                                progress.update(task, advance=1)
-                                continue
-
-                            # Process only user/assistant types
-                            if data.get('type') in ['user', 'assistant']:
-                                # Exclude continuation summaries according to settings
-                                if self._should_exclude_continuation_message(data):
-                                    progress.update(task, advance=1)
-                                    continue
-
-                                processed_msg = self._process_message(data, skip_preprocessing=skip_preprocessing)
-                                if processed_msg:
-                                    messages.append(processed_msg)
-                                progress.update(task, advance=1)
-                            else:
-                                progress.update(task, advance=1)
-
-                        except json.JSONDecodeError as e:
-                            print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
-                            progress.update(task, advance=1)
-                            continue
-            else:
-                # Process without progress bar (fast mode)
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
+                    # Exclude summary type
+                    if data.get('type') == 'summary':
                         continue
 
-                    try:
-                        data = json.loads(line)
-
-                        # Exclude summary type
-                        if data.get('type') == 'summary':
+                    # Process only user/assistant types
+                    if data.get('type') in ['user', 'assistant']:
+                        # Exclude continuation summaries according to settings
+                        if self._should_exclude_continuation_message(data):
                             continue
 
-                        # Process only user/assistant types
-                        if data.get('type') in ['user', 'assistant']:
-                            # Exclude continuation summaries according to settings
-                            if self._should_exclude_continuation_message(data):
-                                continue
+                        processed_msg = self._process_message(data, skip_preprocessing=skip_preprocessing)
+                        if processed_msg:
+                            messages.append(processed_msg)
 
-                            processed_msg = self._process_message(data, skip_preprocessing=skip_preprocessing)
-                            if processed_msg:
-                                messages.append(processed_msg)
-
-                    except json.JSONDecodeError as e:
-                        print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
-                        # Simple implementation: skip error lines
-                        continue
+                except json.JSONDecodeError as e:
+                    print(f"JSON parse error {file_path}:{line_num}: {e}", file=sys.stderr)
+                    continue
 
         return messages
 
@@ -1332,6 +1320,9 @@ class MessageExtractor:
                             # Extract only text type
                             elif item.get('type') == 'text':
                                 text_parts.append(item.get('text', ''))
+                            # Skip image type in simple processing
+                            elif item.get('type') == 'image':
+                                continue
                     
                     processed['content'] = '\n'.join(text_parts)
                 else:
@@ -1359,89 +1350,22 @@ class MessageExtractor:
             print(f"Message processing error: {e}", file=sys.stderr)
             return None
     
-    def _is_simple_inline_code(self, code_content: str) -> bool:
-        """
-        Determine if code is short inline code
-
-        Args:
-            code_content: Code block content
-
-        Returns:
-            True: Short inline code, False: Code subject to summarization
-        """
-        lines = [line.strip() for line in code_content.strip().split('\n') if line.strip()]
-
-        # Basically inline if only 1 line
-        if len(lines) <= 1:
-            return True
-
-        # Treat as inline if 2-3 lines under following conditions
-        if len(lines) <= 3:
-            # Combination of short configuration lines
-            if all(len(line) <= 50 for line in lines):
-                return True
-
-            # Sequence of simple commands
-            simple_patterns = [
-                r'^[a-zA-Z_][a-zA-Z0-9_-]*\s*=',  # Variable assignment
-                r'^[a-zA-Z][a-zA-Z0-9_-]*\s+',    # Command
-                r'^\w+\s*\(',                      # Function call
-                r'^\s*#',                          # Comment line
-                r'^\s*//|^\s*/\*',                 # Comment line (C-style)
-                r'^\s*"[^"]*"',                    # String literal
-                r'^\s*\{|\s*\}',                   # Braces only
-            ]
-
-            simple_line_count = 0
-            for line in lines:
-                for pattern in simple_patterns:
-                    if re.match(pattern, line):
-                        simple_line_count += 1
-                        break
-
-            # Treat as inline if majority are simple lines
-            if simple_line_count >= len(lines) * 0.8:
-                return True
-
-        return False
-
     def preprocess_text(self, content: str) -> str:
         """
         Text preprocessing
 
-        - Code block processing (summarize/remove/keep)
-        - Normalize excessive whitespace
-        - Remove control characters
+        - Normalize excessive blank lines
+        - Strip leading/trailing whitespace
         """
         if not content:
             return ""
 
-        # Determine code block processing method according to settings
-        # ccexport defaults to 'keep' (no LLM summarization)
-        code_block_handling = self.config.code_block_handling if self.config else 'keep'
-
-        # Code block processing
-        if code_block_handling == 'keep':
-            # Keep code blocks as-is
-            pass
-        elif code_block_handling == 'remove':
-            # Simple removal
-            content = re.sub(r'```.*?```', '[Code block removed]', content, flags=re.DOTALL)
-
-        # Keep inline code (don't remove)
-        # Contains important information like directory names, file names, variable names
-
-        # Simplify large JSON blocks (only multi-line)
-        # Keep small single-line JSON
-        content = re.sub(r'\{[^\{\}]*\n[^\{\}]*\}', '[JSON omitted]', content, flags=re.DOTALL)
-
-        # Normalize consecutive whitespace/newlines
+        # Normalize 3+ consecutive blank lines to 2
         content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)
-        content = re.sub(r'[ \t]+', ' ', content)
 
         # Remove leading/trailing whitespace
         content = content.strip()
-        
+
         return content
     
     def get_session_info(self, project_name: str, session_id: str = None) -> List[Dict[str, Any]]:
@@ -1487,11 +1411,14 @@ class MessageExtractor:
                     'start_time': node.timestamp,
                     'end_time': node.timestamp,
                     'message_count': 0,
+                    'turn_count': 0,
                     'cwd': node.raw_data.get('cwd'),
                     'jsonl_path': str(jsonl_path)
                 }
 
             sessions[node_session_id]['message_count'] += 1
+            if node.type == 'user':
+                sessions[node_session_id]['turn_count'] += 1
 
             # Update start_time with earlier time
             if node.timestamp and (not sessions[node_session_id]['start_time'] or

@@ -6,8 +6,10 @@ org-mode formatter
 Export Claude Code conversation logs in org-mode format.
 """
 
+import base64
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from .osc_tap_loader import parse_iso_timestamp, format_local_timestamp, format_duration
 
@@ -30,13 +32,36 @@ class OrgFormatter:
     def __init__(self, config=None):
         self.config = config
 
+    @staticmethod
+    def _save_image(data: str, media_type: str, images_dir: Path, counter: list,
+                    original_filename: str = None) -> str:
+        """Save base64 image to file and return relative path"""
+        counter[0] += 1
+        if original_filename:
+            filename = original_filename
+            filepath = images_dir / filename
+            if filepath.exists():
+                stem = filepath.stem
+                ext = filepath.suffix
+                filename = f"{stem}_{counter[0]:03d}{ext}"
+        else:
+            ext = media_type.split('/')[-1] if '/' in media_type else 'png'
+            if ext == 'jpeg':
+                ext = 'jpg'
+            filename = f"img_{counter[0]:03d}.{ext}"
+        filepath = images_dir / filename
+        images_dir.mkdir(parents=True, exist_ok=True)
+        filepath.write_bytes(base64.b64decode(data))
+        return f"{images_dir.name}/{filename}"
+
     def format_extract(
         self,
         messages: List[Dict[str, Any]],
         project_name: str = "Claude Code Export",
         summaries: Optional[List[Dict[str, Any]]] = None,
         titles_map: Optional[Dict[int, str]] = None,
-        detail_level: str = 'normal'
+        detail_level: str = 'normal',
+        output_path: Optional[Path] = None
     ) -> str:
         """
         Convert messages to org-mode format
@@ -47,10 +72,18 @@ class OrgFormatter:
             summaries: List of summary entries (for section titles)
             titles_map: Title map from osc-tap (index → title)
             detail_level: Output detail level ('text', 'normal', 'full')
+            output_path: Output file path (for saving images alongside)
 
         Returns:
             org-mode format string
         """
+        # Image saving setup
+        self._images_dir = None
+        self._image_counter = [0]
+        if output_path:
+            output_path = Path(output_path)
+            self._images_dir = output_path.parent / f"{output_path.stem}_images"
+
         lines = []
 
         # Collect approved plans first (for link list generation)
@@ -286,8 +319,24 @@ class OrgFormatter:
             skill_name = msg.get('skill_name', 'unknown')
             lines.append(f"[Skill: {skill_name} invoked]")
         else:
-            # User message content
-            lines.extend(self._convert_content(user_content))
+            # User message content, with images if present
+            user_content_items = user_msg.get('content_items', [])
+            has_images = self._images_dir and any(
+                ci.get('type') == 'image' for ci in user_content_items
+            )
+            if has_images:
+                for ci in user_content_items:
+                    if ci.get('type') == 'text':
+                        lines.extend(self._convert_content(ci.get('content', '')))
+                    elif ci.get('type') == 'image':
+                        rel_path = self._save_image(
+                            ci['data'], ci.get('media_type', 'image/png'),
+                            self._images_dir, self._image_counter,
+                            ci.get('filename')
+                        )
+                        lines.append(f"[[file:{rel_path}]]")
+            else:
+                lines.extend(self._convert_content(user_content))
         lines.append("")
 
         # Assistant response with interleaved tool usage

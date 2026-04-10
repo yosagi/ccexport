@@ -19,7 +19,7 @@ class HTMLExtractFormatter:
         """Initialize
 
         Args:
-            config: Configuration object (used for Ollama settings in style filter)
+            config: Configuration object
         """
         self.config = config
         # Setup Jinja2 environment
@@ -145,6 +145,12 @@ class HTMLExtractFormatter:
                 is_skill = msg.get('is_skill_invocation', False)
                 skill_name = msg.get('skill_name', 'unknown')
 
+                # Check if user message has images in content_items
+                user_content_items = user_msg.get('content_items', [])
+                has_images = any(
+                    ci.get('type') == 'image' for ci in user_content_items
+                )
+
                 if is_skill:
                     # Collapse skill invocations with details tag
                     inner_html = self._convert_markdown_to_html(
@@ -155,6 +161,12 @@ class HTMLExtractFormatter:
                         f'<summary>[Skill: {skill_name} invoked]</summary>\n'
                         f'{inner_html}\n'
                         f'</details>'
+                    )
+                elif has_images:
+                    # Render user content with embedded images
+                    user_html = self._render_user_content_with_images(
+                        user_content_items,
+                        collapse_code_blocks, min_lines_to_collapse
                     )
                 else:
                     # Normal Markdown → HTML conversion
@@ -219,6 +231,32 @@ class HTMLExtractFormatter:
 
         return conversations
 
+    def _render_user_content_with_images(
+        self,
+        content_items: list,
+        collapse_code_blocks: bool,
+        min_lines_to_collapse: int
+    ) -> str:
+        """Render user content_items with embedded images"""
+        parts = []
+        for ci in content_items:
+            if ci.get('type') == 'text':
+                text = ci.get('content', '')
+                if text.strip():
+                    parts.append(self._convert_markdown_to_html(
+                        text, collapse_code_blocks, min_lines_to_collapse
+                    ))
+            elif ci.get('type') == 'image':
+                media_type = ci.get('media_type', 'image/png')
+                data = ci.get('data', '')
+                parts.append(
+                    f'<div class="embedded-image">'
+                    f'<img src="data:{media_type};base64,{data}" '
+                    f'style="max-width:100%; height:auto;" />'
+                    f'</div>'
+                )
+        return '\n'.join(parts)
+
     def _render_content_items_html(
         self,
         content_items: list,
@@ -237,6 +275,15 @@ class HTMLExtractFormatter:
                     parts.append(self._convert_markdown_to_html(
                         text, collapse_code_blocks, min_lines_to_collapse
                     ))
+            elif ci['type'] == 'image':
+                media_type = ci.get('media_type', 'image/png')
+                data = ci.get('data', '')
+                parts.append(
+                    f'<div class="embedded-image">'
+                    f'<img src="data:{media_type};base64,{data}" '
+                    f'style="max-width:100%; height:auto;" />'
+                    f'</div>'
+                )
             elif ci['type'] == 'tool_use':
                 summary_text = html_module.escape(ci.get('summary', ci.get('name', '')))
                 is_error = ci.get('tool_result_is_error', False)

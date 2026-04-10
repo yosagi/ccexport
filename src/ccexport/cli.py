@@ -39,12 +39,11 @@ def cli():
               default='normal',
               help='Output detail level (text=no tools, normal=tool summaries, full=tool I/O)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose logging')
-@click.option('--config-file', type=click.Path(exists=True), help='Config file path')
 @click.option('--titles-dir', type=click.Path(exists=True),
               help='osc-tap log directory (for title display)')
 def export(session: str, output: str, output_format: str,
            project: Optional[str], detail_level: str, verbose: bool,
-           config_file: Optional[str], titles_dir: Optional[str]):
+           titles_dir: Optional[str]):
     """Export conversation by specifying session ID"""
 
     def debug(msg: str):
@@ -55,7 +54,7 @@ def export(session: str, output: str, output_format: str,
 
     # 1. Load configuration
     t0 = time.time()
-    config = Config(config_file=config_file, verbose=verbose)
+    config = Config(verbose=verbose)
     extractor = MessageExtractor(config.projects_dir, config)
     debug(f"Config loaded: {time.time() - t0:.3f}s")
 
@@ -132,7 +131,8 @@ def export(session: str, output: str, output_format: str,
     t0 = time.time()
     output_path = Path(output)
     content = _format_messages(messages, project_name, output_format, config,
-                               summaries, titles_map, detail_level)
+                               summaries, titles_map, detail_level,
+                               output_path=output_path)
     debug(f"Format conversion ({output_format}): {time.time() - t0:.3f}s")
 
     # 6. Write to file
@@ -149,10 +149,9 @@ def export(session: str, output: str, output_format: str,
 
 @cli.command()
 @click.option('--json', 'as_json', is_flag=True, help='Output in JSON format')
-@click.option('--config-file', type=click.Path(exists=True), help='Config file path')
-def projects(as_json: bool, config_file: Optional[str]):
+def projects(as_json: bool):
     """List projects"""
-    config = Config(config_file=config_file)
+    config = Config()
     extractor = MessageExtractor(config.projects_dir, config)
 
     project_list = extractor.list_projects()
@@ -172,10 +171,9 @@ def projects(as_json: bool, config_file: Optional[str]):
 @cli.command()
 @click.option('--project', '-p', required=True, help='Project name')
 @click.option('--json', 'as_json', is_flag=True, help='Output in JSON format')
-@click.option('--config-file', type=click.Path(exists=True), help='Config file path')
-def sessions(project: str, as_json: bool, config_file: Optional[str]):
+def sessions(project: str, as_json: bool):
     """List sessions in a project"""
-    config = Config(config_file=config_file)
+    config = Config()
     extractor = MessageExtractor(config.projects_dir, config)
 
     try:
@@ -202,10 +200,10 @@ def sessions(project: str, as_json: bool, config_file: Optional[str]):
 @cli.command('session-info')
 @click.option('--session', '-s', required=True, help='Session ID (prefix match)')
 @click.option('--json', 'as_json', is_flag=True, help='Output in JSON format')
-@click.option('--config-file', type=click.Path(exists=True), help='Config file path')
-def session_info(session: str, as_json: bool, config_file: Optional[str]):
+@click.option('--verbose', '-v', is_flag=True, help='Include start/end time, turn count, message count (requires JSONL parsing)')
+def session_info(session: str, as_json: bool, verbose: bool):
     """Get project info from session ID"""
-    config = Config(config_file=config_file)
+    config = Config()
     extractor = MessageExtractor(config.projects_dir, config)
 
     result = extractor.find_project_by_session(session)
@@ -218,17 +216,31 @@ def session_info(session: str, as_json: bool, config_file: Optional[str]):
 
     project_name, full_session_id, jsonl_path = result
 
+    info = {
+        "project": project_name,
+        "session_id": full_session_id,
+        "jsonl_path": jsonl_path
+    }
+
+    if verbose:
+        session_detail = extractor.get_session_info(project_name, full_session_id)
+        if session_detail:
+            info["start_time"] = session_detail.get("start_time")
+            info["end_time"] = session_detail.get("end_time")
+            info["turn_count"] = session_detail.get("turn_count", 0)
+            info["message_count"] = session_detail.get("message_count", 0)
+
     if as_json:
-        info = {
-            "project": project_name,
-            "session_id": full_session_id,
-            "jsonl_path": jsonl_path
-        }
         click.echo(json.dumps(info, ensure_ascii=False, indent=2))
     else:
         click.echo(f"Project: {project_name}")
         click.echo(f"Session ID: {full_session_id}")
         click.echo(f"JSONL path: {jsonl_path}")
+        if verbose and "start_time" in info:
+            click.echo(f"Start time: {info['start_time']}")
+            click.echo(f"End time: {info['end_time']}")
+            click.echo(f"Turn count: {info['turn_count']}")
+            click.echo(f"Message count: {info['message_count']}")
 
 
 DEFAULT_NAME_TEMPLATE = "{project}_{date}_{session}.{ext}"
@@ -282,8 +294,6 @@ def _compute_logical_date(iso_timestamp: str, boundary_hour: int, boundary_minut
               default='normal',
               help='Output detail level (text=no tools, normal=tool summaries, full=tool I/O)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose logging')
-@click.option('--config-file', type=click.Path(exists=True),
-              help='Config file path')
 @click.option('--titles-dir', type=click.Path(exists=True),
               help='osc-tap log directory (for title display)')
 @click.option('--day-boundary', default='00:00',
@@ -292,7 +302,7 @@ def _compute_logical_date(iso_timestamp: str, boundary_hour: int, boundary_minut
 def batch(project: tuple[str, ...], output: str, output_format: str,
           since: Optional[str], name_template: Optional[str],
           detail_level: str,
-          verbose: bool, config_file: Optional[str],
+          verbose: bool,
           titles_dir: Optional[str], day_boundary: str):
     """Batch export all sessions in a project (multiple projects supported)"""
     total_start = time.time()
@@ -307,7 +317,7 @@ def batch(project: tuple[str, ...], output: str, output_format: str,
         sys.exit(1)
 
     # Load configuration
-    config = Config(config_file=config_file, verbose=verbose)
+    config = Config(verbose=verbose)
     extractor = MessageExtractor(config.projects_dir, config)
 
     # Collect sessions from all specified projects
@@ -452,7 +462,8 @@ def _export_single_session(
     # Format and write
     content = _format_messages(
         messages, project_name, output_format, config,
-        all_summaries, titles_map, detail_level
+        all_summaries, titles_map, detail_level,
+        output_path=output_path
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -463,7 +474,8 @@ def _format_messages(messages: list, project_name: str,
                     output_format: str, config: Config,
                     summaries: list = None,
                     titles_map: dict = None,
-                    detail_level: str = 'normal') -> str:
+                    detail_level: str = 'normal',
+                    output_path: Path = None) -> str:
     """Format messages"""
     if titles_map is None:
         titles_map = {}
@@ -483,13 +495,15 @@ def _format_messages(messages: list, project_name: str,
         from .md_formatter import format_as_markdown
         return format_as_markdown(messages, project_name, grouped=True,
                                   summaries=summaries, titles_map=titles_map,
-                                  detail_level=detail_level)
+                                  detail_level=detail_level,
+                                  output_path=output_path)
     elif output_format == 'org':
         from .org_formatter import OrgFormatter
         formatter = OrgFormatter(config)
         return formatter.format_extract(messages, project_name,
                                         summaries=summaries, titles_map=titles_map,
-                                        detail_level=detail_level)
+                                        detail_level=detail_level,
+                                        output_path=output_path)
     elif output_format == 'json':
         output = {
             'project_name': project_name,
