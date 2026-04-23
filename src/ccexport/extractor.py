@@ -479,6 +479,10 @@ class MessageExtractor:
         elif tool_name == 'WebFetch':
             url = tool_input.get('url', '')
             return f"WebFetch: {url}"
+        elif tool_name == 'Agent':
+            subagent_type = tool_input.get('subagent_type', '')
+            description = tool_input.get('description', '')
+            return f"Agent({subagent_type}): {description}"
         elif tool_name == 'Task':
             subagent_type = tool_input.get('subagent_type', '')
             description = tool_input.get('description', '')
@@ -564,10 +568,16 @@ class MessageExtractor:
             ci['tool_result_is_error'] = result.get('is_error', False)
             ci['structured_result'] = result.get('structured_result', {})
 
-            # Subagent info for Task tool
-            if tool_name == 'Task':
+            # Subagent info for Agent/Task tool
+            if tool_name in ('Agent', 'Task'):
                 ci['subagent_type'] = tool_input.get('subagent_type')
                 ci['subagent_id'] = None
+            # Skill tool with forked execution
+            if tool_name == 'Skill':
+                result_text = ci.get('tool_result_content', '')
+                if 'forked execution' in result_text:
+                    ci['subagent_type'] = 'skill'
+                    ci['subagent_id'] = None
 
     def _process_node(
         self,
@@ -621,6 +631,21 @@ class MessageExtractor:
             message = raw_data.get('message', {})
             if isinstance(message, dict):
                 processed['role'] = message.get('role')
+
+                # Extract usage/model/id for assistant messages (for token visualization)
+                if node.type == 'assistant':
+                    usage = message.get('usage')
+                    if isinstance(usage, dict):
+                        processed['usage'] = usage
+                    model = message.get('model')
+                    if model:
+                        processed['model'] = model
+                    msg_id = message.get('id')
+                    if msg_id:
+                        # Anthropic API message id (msg_...). One API call may span
+                        # multiple JSONL entries (thinking, text, tool_use) that all
+                        # share the same id and repeat the same usage record.
+                        processed['message_id'] = msg_id
 
                 # Extract text and tool_use from content array, preserving order
                 content = message.get('content', [])
@@ -1368,6 +1393,50 @@ class MessageExtractor:
 
         return content
     
+    def list_session_ids(self, project_name: str) -> List[Dict[str, Any]]:
+        """
+        Get list of session IDs in project (lightweight, minimal JSONL parsing)
+
+        Reads filenames, file modification times, and the first timestamp from
+        each JSONL file. Results are sorted by modification time (newest first).
+
+        Args:
+            project_name: Project name
+
+        Returns:
+            List of dicts with session_id, start_time, sorted by mtime (newest first)
+        """
+        project_path = self._find_project_dir(project_name)
+        if not project_path:
+            raise FileNotFoundError(f"Project not found: {project_name}")
+
+        jsonl_files = list(project_path.glob('*.jsonl'))
+        jsonl_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+        results = []
+        for f in jsonl_files:
+            start_time = None
+            try:
+                with open(f, 'r') as fh:
+                    for i, line in enumerate(fh):
+                        if i > 10:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        ts = data.get('timestamp')
+                        if ts:
+                            start_time = ts
+                            break
+            except Exception:
+                pass
+            results.append({
+                'session_id': f.stem,
+                'start_time': start_time,
+            })
+        return results
+
     def get_session_info(self, project_name: str, session_id: str = None) -> List[Dict[str, Any]]:
         """
         Get session information within project
@@ -1412,13 +1481,28 @@ class MessageExtractor:
                     'end_time': node.timestamp,
                     'message_count': 0,
                     'turn_count': 0,
+                    'total_duration_ms': 0,
+                    'has_duration_data': False,
+                    'session_type': 'interactive',
                     'cwd': node.raw_data.get('cwd'),
                     'jsonl_path': str(jsonl_path)
                 }
 
+            # Detect session type from entrypoint
+            entrypoint = node.raw_data.get('entrypoint')
+            if entrypoint and entrypoint != 'cli':
+                sessions[node_session_id]['session_type'] = 'headless'
+
             sessions[node_session_id]['message_count'] += 1
             if node.type == 'user':
                 sessions[node_session_id]['turn_count'] += 1
+
+            # Accumulate turn_duration
+            if node.type == 'system' and node.raw_data.get('subtype') == 'turn_duration':
+                duration_ms = node.raw_data.get('durationMs')
+                if duration_ms is not None:
+                    sessions[node_session_id]['total_duration_ms'] += duration_ms
+                    sessions[node_session_id]['has_duration_data'] = True
 
             # Update start_time with earlier time
             if node.timestamp and (not sessions[node_session_id]['start_time'] or
@@ -1524,4 +1608,432 @@ class MessageExtractor:
             List of session IDs (single element)
         """
         return [session_id]
+
+    # ── Subagent loading ──────────────────────────────────────────
+
+    def load_subagents(
+        self,
+        project_name: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Load subagent conversation logs for a session.
+
+        Reads {session_id}/subagents/ directory and extracts messages from
+        each subagent JSONL file.
+
+        Args:
+            project_name: Project name
+            session_id: Session ID
+
+        Returns:
+            Dict mapping agentId -> {
+                'agent_type': str,
+                'description': str,
+                'groups': list (user_instruction_group format),
+                'start_timestamp': str,
+            }
+        """
+        project_path = self._find_project_dir(project_name)
+        if not project_path:
+            return {}
+
+        subagents_dir = project_path / session_id / 'subagents'
+        if not subagents_dir.exists():
+            return {}
+
+        subagents = {}
+        for jsonl_file in sorted(subagents_dir.glob('agent-*.jsonl')):
+            agent_id = jsonl_file.stem.replace('agent-', '')
+
+            # Read meta.json
+            meta_file = jsonl_file.with_suffix('.meta.json')
+            agent_type = ''
+            description = ''
+            if meta_file.exists():
+                try:
+                    with open(meta_file, 'r', encoding='utf-8') as f:
+                        meta = json.load(f)
+                    agent_type = meta.get('agentType', '')
+                    description = meta.get('description', '')
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            # Extract messages using existing parser
+            try:
+                nodes, _ = self._parser._parse_single_file(jsonl_file)
+                if not nodes:
+                    continue
+
+                dag = self._parser._build_dag(nodes, [])
+
+                messages = self._extract_messages_from_dag(
+                    dag, apply_filter=True, apply_preprocessing=True
+                )
+                if not messages:
+                    continue
+
+                groups = self.group_messages_by_user_instruction(messages)
+
+                # Get start timestamp from first node
+                start_ts = min(n.timestamp for n in nodes) if nodes else ''
+
+                subagents[agent_id] = {
+                    'agent_type': agent_type,
+                    'description': description,
+                    'groups': groups,
+                    'start_timestamp': start_ts,
+                }
+            except Exception as e:
+                print(f"Subagent parse error {jsonl_file.name}: {e}", file=sys.stderr)
+                continue
+
+        if subagents:
+            print(f"Subagents loaded: {len(subagents)} agents", file=sys.stderr)
+
+        return subagents
+
+    def _build_tool_use_to_agent_map(
+        self,
+        project_name: str,
+        session_id: str,
+    ) -> Dict[str, str]:
+        """
+        Build mapping from tool_use_id to agentId.
+
+        Uses queue-operation entries if available, otherwise falls back to
+        timestamp-based matching.
+
+        Args:
+            project_name: Project name
+            session_id: Session ID
+
+        Returns:
+            Dict mapping tool_use_id -> agentId
+        """
+        project_path = self._find_project_dir(project_name)
+        if not project_path:
+            return {}
+
+        jsonl_file = project_path / f"{session_id}.jsonl"
+        if not jsonl_file.exists():
+            return {}
+
+        # Phase 1: Try queue-operation entries
+        queue_map = {}  # tool_use_id -> agentId
+        agent_tool_uses = {}  # tool_use_id -> timestamp (for Agent/Task/Skill tools)
+
+        with open(jsonl_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Collect queue-operation enqueue entries
+                if (data.get('type') == 'queue-operation'
+                        and data.get('operation') == 'enqueue'):
+                    try:
+                        content = json.loads(data.get('content', '{}'))
+                        task_id = content.get('task_id')
+                        tool_use_id = content.get('tool_use_id')
+                        if task_id and tool_use_id:
+                            queue_map[tool_use_id] = task_id
+                    except json.JSONDecodeError:
+                        pass
+                    continue
+
+                # Collect Agent/Task/Skill tool_use entries with timestamps
+                msg = data.get('message', {})
+                content = msg.get('content', [])
+                timestamp = data.get('timestamp', '')
+                if isinstance(content, list):
+                    for item in content:
+                        if (isinstance(item, dict)
+                                and item.get('type') == 'tool_use'
+                                and item.get('name') in ('Agent', 'Task', 'Skill')):
+                            agent_tool_uses[item['id']] = timestamp
+
+        if queue_map:
+            return queue_map
+
+        # Phase 2: Fallback to timestamp-based matching
+        return self._match_by_timestamp(project_name, session_id, agent_tool_uses)
+
+    def _match_by_timestamp(
+        self,
+        project_name: str,
+        session_id: str,
+        agent_tool_uses: Dict[str, str],
+    ) -> Dict[str, str]:
+        """
+        Match tool_use_ids to agentIds using timestamp proximity.
+
+        Args:
+            project_name: Project name
+            session_id: Session ID
+            agent_tool_uses: Dict of tool_use_id -> timestamp
+
+        Returns:
+            Dict mapping tool_use_id -> agentId
+        """
+        if not agent_tool_uses:
+            return {}
+
+        project_path = self._find_project_dir(project_name)
+        if not project_path:
+            return {}
+
+        subagents_dir = project_path / session_id / 'subagents'
+        if not subagents_dir.exists():
+            return {}
+
+        # Collect subagent start timestamps
+        agent_timestamps = {}  # agentId -> timestamp
+        for jsonl_file in subagents_dir.glob('agent-*.jsonl'):
+            agent_id = jsonl_file.stem.replace('agent-', '')
+            try:
+                with open(jsonl_file, 'r', encoding='utf-8') as f:
+                    first_line = f.readline().strip()
+                    if first_line:
+                        first = json.loads(first_line)
+                        agent_timestamps[agent_id] = first.get('timestamp', '')
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        if not agent_timestamps:
+            return {}
+
+        # Match by nearest timestamp
+        result = {}
+        used_agents = set()
+
+        # Sort tool_uses by timestamp for deterministic matching
+        sorted_tool_uses = sorted(agent_tool_uses.items(), key=lambda x: x[1])
+
+        for tool_use_id, tool_ts in sorted_tool_uses:
+            best_agent = None
+            best_diff = float('inf')
+
+            for agent_id, agent_ts in agent_timestamps.items():
+                if agent_id in used_agents:
+                    continue
+                try:
+                    t1 = datetime.fromisoformat(tool_ts.replace('Z', '+00:00'))
+                    t2 = datetime.fromisoformat(agent_ts.replace('Z', '+00:00'))
+                    diff = abs((t2 - t1).total_seconds())
+                    # Only match if within 30 seconds and agent starts after tool_use
+                    if diff < best_diff and diff < 30.0 and t2 >= t1:
+                        best_diff = diff
+                        best_agent = agent_id
+                except (ValueError, TypeError):
+                    continue
+
+            if best_agent:
+                result[tool_use_id] = best_agent
+                used_agents.add(best_agent)
+
+        return result
+
+    def enrich_subagent_data(
+        self,
+        grouped_messages: List[Dict[str, Any]],
+        subagents: Dict[str, Any],
+        tool_use_to_agent: Dict[str, str],
+    ) -> None:
+        """
+        Inject subagent conversation data into content_items of grouped messages.
+
+        For each Agent/Task/Skill(forked) tool_use in content_items, adds
+        'subagent_groups' and 'subagent_meta' fields if a matching subagent exists.
+
+        Modifies grouped_messages in place.
+
+        Args:
+            grouped_messages: List of user_instruction_groups
+            subagents: Dict from load_subagents()
+            tool_use_to_agent: Dict from _build_tool_use_to_agent_map()
+        """
+        if not subagents or not tool_use_to_agent:
+            return
+
+        for group in grouped_messages:
+            for ci in group.get('combined_content_items', []):
+                if ci.get('type') != 'tool_use':
+                    continue
+                if ci.get('subagent_id') is not None:
+                    continue  # already enriched
+
+                tool_use_id = ci.get('id')
+                if not tool_use_id:
+                    continue
+
+                agent_id = tool_use_to_agent.get(tool_use_id)
+                if not agent_id or agent_id not in subagents:
+                    continue
+
+                sa = subagents[agent_id]
+                ci['subagent_id'] = agent_id
+                ci['subagent_groups'] = sa['groups']
+                ci['subagent_meta'] = {
+                    'agent_type': sa['agent_type'],
+                    'description': sa['description'],
+                }
+                # Note: per-assistant content_items share the same objects,
+                # so enriching combined_content_items is sufficient.
+
+    # ── Token usage aggregation ──────────────────────────────────
+
+    @staticmethod
+    def _empty_usage() -> Dict[str, int]:
+        return {
+            'input_tokens': 0,
+            'cache_creation_input_tokens': 0,
+            'cache_read_input_tokens': 0,
+            'output_tokens': 0,
+            'cache_creation_ephemeral_1h_input_tokens': 0,
+            'cache_creation_ephemeral_5m_input_tokens': 0,
+        }
+
+    @staticmethod
+    def _accumulate_usage(target: Dict[str, int], source: Dict[str, Any]) -> None:
+        """Add source usage fields into target (in place)."""
+        target['input_tokens'] += int(source.get('input_tokens') or 0)
+        target['cache_creation_input_tokens'] += int(
+            source.get('cache_creation_input_tokens') or 0
+        )
+        target['cache_read_input_tokens'] += int(
+            source.get('cache_read_input_tokens') or 0
+        )
+        target['output_tokens'] += int(source.get('output_tokens') or 0)
+        cc = source.get('cache_creation')
+        if isinstance(cc, dict):
+            target['cache_creation_ephemeral_1h_input_tokens'] += int(
+                cc.get('ephemeral_1h_input_tokens') or 0
+            )
+            target['cache_creation_ephemeral_5m_input_tokens'] += int(
+                cc.get('ephemeral_5m_input_tokens') or 0
+            )
+
+    @classmethod
+    def _extract_message_usage(cls, usage: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract a normalized per-message usage record from a raw usage dict."""
+        rec = cls._empty_usage()
+        cls._accumulate_usage(rec, usage)
+        iterations = usage.get('iterations')
+        if isinstance(iterations, list):
+            rec['iterations'] = iterations
+        return rec
+
+    def compute_token_usage(
+        self,
+        grouped_messages: List[Dict[str, Any]],
+        subagents: Optional[Dict[str, Any]] = None,
+        tool_use_to_agent: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """
+        Annotate each group with a `token_usage` summary covering the
+        group's own assistant messages plus any linked subagents.
+
+        Structure set on each group:
+            token_usage = {
+                'total': {4 base fields + 2 ephemeral breakdown fields},
+                'messages': [
+                    {<usage fields>, 'model', 'timestamp', 'iterations'?}, ...
+                ],
+                'subagents': [
+                    {'agent_id', 'name', 'description',
+                     'message_count', 'total': {...}}, ...
+                ],
+            }
+
+        Modifies grouped_messages in place.
+        """
+        if subagents is None:
+            subagents = {}
+        if tool_use_to_agent is None:
+            tool_use_to_agent = {}
+
+        # Precompute subagent totals (each subagent can have multiple groups
+        # and multiple assistant messages; we lump them into one total).
+        # Dedupe by message_id: one API call can span multiple JSONL entries
+        # (thinking/text/tool_use blocks) that all carry the same usage record.
+        subagent_totals: Dict[str, Dict[str, Any]] = {}
+        for agent_id, sa in subagents.items():
+            total = self._empty_usage()
+            msg_count = 0
+            seen_ids: Set[str] = set()
+            for sg in sa.get('groups', []):
+                for msg in sg.get('assistant_messages', []):
+                    usage = msg.get('usage')
+                    if not isinstance(usage, dict):
+                        continue
+                    msg_id = msg.get('message_id')
+                    if msg_id and msg_id in seen_ids:
+                        continue
+                    if msg_id:
+                        seen_ids.add(msg_id)
+                    self._accumulate_usage(total, usage)
+                    msg_count += 1
+            subagent_totals[agent_id] = {
+                'agent_id': agent_id,
+                'name': sa.get('agent_type', '') or '',
+                'description': sa.get('description', '') or '',
+                'message_count': msg_count,
+                'total': total,
+            }
+
+        for group in grouped_messages:
+            group_total = self._empty_usage()
+            per_message: List[Dict[str, Any]] = []
+            seen_msg_ids: Set[str] = set()
+
+            for msg in group.get('assistant_messages', []):
+                usage = msg.get('usage')
+                if not isinstance(usage, dict):
+                    continue
+                msg_id = msg.get('message_id')
+                if msg_id and msg_id in seen_msg_ids:
+                    # Same API call already counted; skip duplicate content-block entry
+                    continue
+                if msg_id:
+                    seen_msg_ids.add(msg_id)
+                self._accumulate_usage(group_total, usage)
+                rec = self._extract_message_usage(usage)
+                rec['model'] = msg.get('model')
+                rec['timestamp'] = msg.get('timestamp')
+                rec['message_id'] = msg_id
+                per_message.append(rec)
+
+            # Linked subagents (via tool_use_id on this group's tool_use items)
+            group_subagents: List[Dict[str, Any]] = []
+            seen_agents: Set[str] = set()
+            for ci in group.get('combined_content_items', []):
+                if ci.get('type') != 'tool_use':
+                    continue
+                tool_use_id = ci.get('id')
+                agent_id = tool_use_to_agent.get(tool_use_id)
+                if not agent_id or agent_id not in subagent_totals:
+                    continue
+                if agent_id in seen_agents:
+                    continue
+                seen_agents.add(agent_id)
+                sa_info = subagent_totals[agent_id]
+                self._accumulate_usage(group_total, sa_info['total'])
+                group_subagents.append({
+                    'agent_id': agent_id,
+                    'name': sa_info['name'],
+                    'description': sa_info['description'],
+                    'message_count': sa_info['message_count'],
+                    'total': dict(sa_info['total']),
+                })
+
+            group['token_usage'] = {
+                'total': group_total,
+                'messages': per_message,
+                'subagents': group_subagents,
+            }
 

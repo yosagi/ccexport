@@ -61,7 +61,8 @@ class OrgFormatter:
         summaries: Optional[List[Dict[str, Any]]] = None,
         titles_map: Optional[Dict[int, str]] = None,
         detail_level: str = 'normal',
-        output_path: Optional[Path] = None
+        output_path: Optional[Path] = None,
+        all_subagents: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Convert messages to org-mode format
@@ -84,6 +85,11 @@ class OrgFormatter:
             output_path = Path(output_path)
             self._images_dir = output_path.parent / f"{output_path.stem}_images"
 
+        # Export subagent files and set links on content_items
+        if output_path and detail_level != 'text':
+            self._export_subagent_files_org(messages, output_path, project_name,
+                                            detail_level)
+
         lines = []
 
         # Collect approved plans first (for link list generation)
@@ -98,6 +104,13 @@ class OrgFormatter:
 
         # Create mapping between summaries and messages
         index_to_summary = self._build_summary_map(messages, summaries) if summaries else {}
+
+        # Subagent index
+        if all_subagents and detail_level != 'text':
+            sa_index = self._build_subagent_index_org(
+                messages, all_subagents, output_path, detail_level)
+            if sa_index:
+                lines.extend(sa_index)
 
         # Conversation section
         lines.append("* Conversations")
@@ -392,9 +405,25 @@ class OrgFormatter:
                 is_error = ci.get('tool_result_is_error', False)
                 error_marker = ' (ERROR)' if is_error else ''
 
+                # Subagent link (set by _export_subagent_files_org)
+                subagent_link = ci.get('subagent_link')
+                if subagent_link:
+                    meta = ci.get('subagent_meta', {})
+                    agent_label = meta.get('description') or summary_text
+                    agent_type = meta.get('agent_type', '')
+                    if agent_type:
+                        agent_label = f"{agent_type}: {agent_label}"
+                    lines.append(f"→ [[file:{subagent_link}][🤖 {agent_label}]]")
+                    lines.append("")
+                    continue
+
                 if detail_level == 'full':
                     structured = ci.get('structured_result', {})
                     result_content = ci.get('tool_result_content', '')
+                    tool_input = ci.get('input', {})
+                    full_command = ''
+                    if ci.get('name') == 'Bash' and tool_input.get('command'):
+                        full_command = tool_input['command']
 
                     if structured.get('resultPatch'):
                         lines.append(f"- 🔧 {summary_text}{error_marker}")
@@ -404,16 +433,24 @@ class OrgFormatter:
                                 line = ' ' + line
                             lines.append(line)
                         lines.append("#+END_SRC")
-                    elif result_content:
-                        if len(result_content) > 2000:
-                            result_content = result_content[:2000] + '\n... (truncated)'
+                    elif full_command or result_content:
                         lines.append(f"- 🔧 {summary_text}{error_marker}")
-                        lines.append("#+BEGIN_EXAMPLE")
-                        for line in result_content.split('\n'):
-                            if line.startswith('*') or line.startswith('#+'):
-                                line = ' ' + line
-                            lines.append(line)
-                        lines.append("#+END_EXAMPLE")
+                        if full_command:
+                            lines.append("#+BEGIN_SRC bash")
+                            for line in full_command.split('\n'):
+                                if line.startswith('*') or line.startswith('#+'):
+                                    line = ' ' + line
+                                lines.append(line)
+                            lines.append("#+END_SRC")
+                        if result_content:
+                            if len(result_content) > 2000:
+                                result_content = result_content[:2000] + '\n... (truncated)'
+                            lines.append("#+BEGIN_EXAMPLE")
+                            for line in result_content.split('\n'):
+                                if line.startswith('*') or line.startswith('#+'):
+                                    line = ' ' + line
+                                lines.append(line)
+                            lines.append("#+END_EXAMPLE")
                     else:
                         lines.append(f"- 🔧 {summary_text}{error_marker}")
                 else:
@@ -421,6 +458,142 @@ class OrgFormatter:
                     lines.append(f"- 🔧 {summary_text}{error_marker}")
                 lines.append("")
         return lines
+
+    def _build_subagent_index_org(
+        self,
+        messages: list,
+        all_subagents: dict,
+        output_path: Path,
+        detail_level: str
+    ) -> list:
+        """Build subagent index section for org output."""
+        if not all_subagents:
+            return []
+
+        matched_ids = set()
+        for group in messages:
+            for ci in group.get('combined_content_items', []):
+                if ci.get('subagent_id'):
+                    matched_ids.add(ci['subagent_id'])
+
+        lines = []
+        lines.append("* Subagents")
+        lines.append("")
+
+        for agent_id, sa in all_subagents.items():
+            agent_type = sa['agent_type']
+            description = sa['description']
+            label = description or f"({agent_type})"
+            short_id = agent_id[:8]
+
+            if agent_id in matched_ids:
+                lines.append(f"- ✅ *{agent_type}*: {label} ={short_id}=")
+            else:
+                if output_path:
+                    subagents_dir = Path(output_path).parent / f"{Path(output_path).stem}_subagents"
+                    safe_label = label[:40].replace(' ', '_').replace('/', '-').replace(':', '')
+                    filename = f"unmatched_{short_id}_{safe_label}.org"
+
+                    sa_lines = []
+                    sa_lines.append(f"#+TITLE: {agent_type}: {label}")
+                    sa_lines.append("#+STARTUP: hideblocks")
+                    sa_lines.append("")
+                    for sa_group in sa['groups']:
+                        user_msg = sa_group.get('user_message', {})
+                        user_content = user_msg.get('content', '')
+                        if user_content.strip():
+                            if len(user_content) > 500:
+                                user_content = user_content[:500] + '\n... (truncated)'
+                            sa_lines.append("*Prompt:*")
+                            sa_lines.append("")
+                            sa_lines.extend(self._convert_content(user_content))
+                            sa_lines.append("")
+                        for assistant_msg in sa_group.get('assistant_messages', []):
+                            content_items = assistant_msg.get('content_items')
+                            if content_items and detail_level != 'text':
+                                sa_lines.extend(self._render_content_items_org(
+                                    content_items, detail_level))
+                            else:
+                                content = assistant_msg.get('content', '')
+                                if content.strip():
+                                    sa_lines.extend(self._convert_content(content))
+                                    sa_lines.append("")
+
+                    subagents_dir.mkdir(parents=True, exist_ok=True)
+                    (subagents_dir / filename).write_text(
+                        '\n'.join(sa_lines), encoding='utf-8')
+                    link = f"{subagents_dir.name}/{filename}"
+                    lines.append(f"- ⚠️ *{agent_type}*: [[file:{link}][{label}]] ={short_id}= /(unmatched)/")
+                else:
+                    lines.append(f"- ⚠️ *{agent_type}*: {label} ={short_id}= /(unmatched)/")
+
+        lines.append("")
+        return lines
+
+    def _export_subagent_files_org(
+        self,
+        messages: list,
+        output_path: Path,
+        project_name: str,
+        detail_level: str
+    ) -> None:
+        """
+        Export subagent conversations as separate org files.
+
+        Sets 'subagent_link' on content_items that have subagent_groups.
+        """
+        output_path = Path(output_path)
+        subagents_dir = output_path.parent / f"{output_path.stem}_subagents"
+        counter = 0
+
+        for group in messages:
+            for ci in group.get('combined_content_items', []):
+                if ci.get('type') != 'tool_use' or not ci.get('subagent_groups'):
+                    continue
+                # Clear any leftover link from other formatter
+                ci.pop('subagent_link', None)
+
+                counter += 1
+                meta = ci.get('subagent_meta', {})
+                agent_type = meta.get('agent_type', 'agent')
+                description = meta.get('description', '')
+                label = description or ci.get('summary', '') or 'subagent'
+
+                safe_label = label[:40].replace(' ', '_').replace('/', '-').replace(':', '')
+                filename = f"agent_{counter:02d}_{safe_label}.org"
+
+                sa_lines = []
+                sa_lines.append(f"#+TITLE: {agent_type}: {label}")
+                sa_lines.append("#+STARTUP: hideblocks")
+                sa_lines.append("")
+
+                for sa_group in ci['subagent_groups']:
+                    user_msg = sa_group.get('user_message', {})
+                    user_content = user_msg.get('content', '')
+                    if user_content.strip():
+                        if len(user_content) > 500:
+                            user_content = user_content[:500] + '\n... (truncated)'
+                        sa_lines.append("*Prompt:*")
+                        sa_lines.append("")
+                        sa_lines.extend(self._convert_content(user_content))
+                        sa_lines.append("")
+
+                    for assistant_msg in sa_group.get('assistant_messages', []):
+                        content_items = assistant_msg.get('content_items')
+                        if content_items and detail_level != 'text':
+                            sa_lines.extend(self._render_content_items_org(
+                                content_items, detail_level))
+                        else:
+                            content = assistant_msg.get('content', '')
+                            if content.strip():
+                                sa_lines.extend(self._convert_content(content))
+                                sa_lines.append("")
+
+                subagents_dir.mkdir(parents=True, exist_ok=True)
+                filepath = subagents_dir / filename
+                filepath.write_text('\n'.join(sa_lines), encoding='utf-8')
+
+                ci['subagent_link'] = f"{subagents_dir.name}/{filename}"
 
     def _format_tool_usage_org(
         self,

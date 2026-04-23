@@ -549,6 +549,69 @@
         .tool-error-marker {
             font-size: 0.8em;
         }
+        /* Subagent index */
+        .subagent-index {
+            margin: 1rem 0;
+            padding: 0.8rem 1rem;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+        }
+        .subagent-index h2 {
+            margin: 0 0 0.5rem 0;
+            font-size: 1.1rem;
+        }
+        .subagent-index ul {
+            margin: 0;
+            padding-left: 1.2rem;
+        }
+        .subagent-index li {
+            margin: 0.3rem 0;
+            font-size: 0.9rem;
+        }
+        .subagent-id {
+            color: #868e96;
+            font-family: monospace;
+            font-size: 0.8rem;
+        }
+        /* Subagent inline display */
+        details.subagent-inline {
+            margin: 0.8rem 0;
+            padding: 0.5rem 0.8rem;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-left: 3px solid #6f42c1;
+            border-radius: 4px;
+        }
+        details.subagent-inline > summary {
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #6f42c1;
+        }
+        .subagent-content {
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid #dee2e6;
+        }
+        .subagent-user {
+            margin: 0.3rem 0;
+            padding: 0.3rem 0.5rem;
+            background: #e9ecef;
+            border-radius: 3px;
+            font-size: 0.9rem;
+        }
+        .tool-command {
+            margin: 0.25rem 0;
+            padding: 0.4rem 0.5rem;
+            font-size: 0.8rem;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 4px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
         .tool-result, .tool-result-diff {
             margin: 0.25rem 0 0 0;
             padding: 0.5rem;
@@ -559,6 +622,236 @@
             overflow-x: auto;
             max-height: 300px;
             overflow-y: auto;
+        }
+
+        /* Token usage visualization */
+        details.token-usage {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.5rem 1.25rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        details.token-usage > summary {
+            cursor: pointer;
+            list-style: none;
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: var(--primary-color);
+            padding: 0.25rem 0;
+        }
+        details.token-usage > summary::-webkit-details-marker { display: none; }
+        details.token-usage > summary::before {
+            content: '▸ ';
+            color: #95a5a6;
+            font-size: 0.8em;
+        }
+        details.token-usage[open] > summary::before {
+            content: '▾ ';
+        }
+        details.token-usage[open] { padding-bottom: 1rem; }
+        .token-usage-inner {
+            padding-top: 0.5rem;
+        }
+        .token-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem 1rem;
+            font-size: 0.8rem;
+            color: #555;
+            margin-bottom: 0.75rem;
+        }
+        .token-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        .token-swatch {
+            display: inline-block;
+            width: 14px;
+            height: 10px;
+            border-radius: 2px;
+            vertical-align: middle;
+        }
+        .token-seg-cache_read  { background: #9ec5fe; }
+        .token-seg-input       { background: #74b72e; }
+        .token-seg-cache_create{ background: #e67e22; }
+        .token-seg-output      { background: #34495e; }
+
+        .token-scale-note {
+            font-size: 0.75rem;
+            color: #7f8c8d;
+            margin-bottom: 0.5rem;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+        }
+        .token-scale-note .note-inner { display: none; }
+        .mode-inner .token-scale-note .note-both { display: none; }
+        .mode-inner .token-scale-note .note-inner { display: inline; }
+
+        .token-mode-toggle {
+            display: inline-flex;
+            gap: 0;
+            margin-bottom: 0.5rem;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .token-mode-btn {
+            background: #f8f9fa;
+            border: none;
+            border-right: 1px solid var(--border-color);
+            padding: 0.25rem 0.75rem;
+            font-size: 0.75rem;
+            cursor: pointer;
+            color: #555;
+            font-family: inherit;
+        }
+        .token-mode-btn:last-child { border-right: none; }
+        .token-mode-btn:hover { background: #e9ecef; }
+        .token-mode-btn.active {
+            background: var(--accent-color);
+            color: white;
+        }
+
+        .token-viz {
+            position: relative;
+            --seg-scale: 1;
+        }
+        .token-viz.mode-inner { --seg-scale: var(--inner-scale, 1); }
+
+        /* Tick sets: show the one matching the current mode */
+        .token-ruler .tick-inner { display: none; }
+        .mode-inner .token-ruler .tick-total { display: none; }
+        .mode-inner .token-ruler .tick-inner { display: inline; }
+
+        /* Guide lines: same swap */
+        .token-guides .guide-inner { display: none; }
+        .mode-inner .token-guides .guide-total { display: none; }
+        .mode-inner .token-guides .guide-inner { display: inline; }
+
+        /* Mode: total only — hide inner bars */
+        .mode-total .token-inner-wrap { display: none; }
+
+        /* Mode: inner only — hide the total bar (but keep the label link) */
+        .mode-inner .token-bar-total { display: none; }
+        .mode-inner .token-bar-inner { height: 10px; opacity: 1; }
+        .mode-inner .token-inner-wrap { padding-left: 0.3rem; margin-top: 0; }
+        .mode-inner .token-inner-wrap + .token-inner-wrap { margin-top: 2px; }
+        .mode-inner .token-row { padding: 3px 0 4px; border-bottom: 1px dashed #eee; }
+        .mode-inner .token-row:last-child { border-bottom: none; }
+        .mode-inner .token-bar-link { pointer-events: auto; }
+        .token-ruler {
+            position: relative;
+            height: 1rem;
+            margin-bottom: 2px;
+            font-size: 0.65rem;
+            color: #95a5a6;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+            overflow: hidden;
+        }
+        .token-tick-label {
+            position: absolute;
+            transform: translateX(-50%);
+            top: 0;
+            white-space: nowrap;
+            left: calc(var(--pct, 0) * 1%);
+        }
+        .token-tick-label::after {
+            content: '';
+            display: block;
+            width: 1px;
+            height: 0.4rem;
+            background: #bdc3c7;
+            margin: 1px auto 0;
+        }
+        .token-guides {
+            position: absolute;
+            top: 1rem;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            pointer-events: none;
+        }
+        .token-guide-line {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            background: rgba(189, 195, 199, 0.4);
+            left: calc(var(--pct, 0) * 1%);
+        }
+        .token-guides { overflow: hidden; }
+
+        .token-rows {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            position: relative;
+            z-index: 1;
+        }
+        .token-row {
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            padding: 1px 0 2px 0;
+        }
+
+        .token-bar-total,
+        .token-bar-inner {
+            display: flex;
+            flex-direction: row;
+            align-items: stretch;
+            width: 100%;
+            background: #f4f5f7;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .token-bar-total { height: 12px; }
+        .token-bar-inner { height: 3px; opacity: 0.85; }
+
+        .token-bar-link {
+            display: block;
+            text-decoration: none;
+            color: inherit;
+            width: 100%;
+        }
+        .token-bar-link:hover .token-bar-total { outline: 1px solid var(--accent-color); }
+
+        .token-seg {
+            height: 100%;
+            display: inline-block;
+            width: calc(var(--pct, 0) * 1% * var(--seg-scale, 1));
+        }
+
+        .token-row-label {
+            font-size: 0.7rem;
+            color: #7f8c8d;
+            font-family: "SF Mono", Monaco, "Courier New", monospace;
+            padding-left: 0.25rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .token-inner-wrap {
+            display: flex;
+            align-items: center;
+            gap: 0.2rem;
+            padding-left: 0.6rem;
+        }
+        .token-inner-wrap + .token-inner-wrap {
+            margin-top: 1px;
+        }
+        .token-inner-wrap .token-bar-inner { flex: 1; }
+        .token-inner-kind {
+            font-size: 0.55rem;
+            color: #95a5a6;
+            min-width: 0.7rem;
+            text-align: center;
+            line-height: 1;
+        }
+        .token-inner-wrap.is-subagent .token-bar-inner {
+            border-left: 2px solid #6f42c1;
         }
     </style>
 </head>
@@ -590,6 +883,81 @@
             </div>
         </header>
 
+        {% if token_usage_viz %}
+        <details class="token-usage">
+            <summary>📊 Token Usage ({{ token_usage_viz.groups | length }} groups, max {{ '{:,}'.format(token_usage_viz.max_total) }} tokens)</summary>
+            <div class="token-usage-inner">
+                <div class="token-legend">
+                    <span class="token-legend-item"><span class="token-swatch token-seg-cache_read"></span>cache_read</span>
+                    <span class="token-legend-item"><span class="token-swatch token-seg-input"></span>input</span>
+                    <span class="token-legend-item"><span class="token-swatch token-seg-cache_create"></span>cache_create</span>
+                    <span class="token-legend-item"><span class="token-swatch token-seg-output"></span>output</span>
+                </div>
+                <div class="token-mode-toggle" role="tablist">
+                    <button type="button" class="token-mode-btn active" data-mode="both">Both</button>
+                    <button type="button" class="token-mode-btn" data-mode="total">Total only</button>
+                    <button type="button" class="token-mode-btn" data-mode="inner">Inner only</button>
+                </div>
+                <div class="token-scale-note">
+                    <span class="note-both">scale: 100% = {{ '{:,}'.format(token_usage_viz.max_total) }} tokens (session max)</span>
+                    <span class="note-inner">scale: 100% = {{ '{:,}'.format(token_usage_viz.max_inner) }} tokens (largest inner bar)</span>
+                </div>
+                <div class="token-viz mode-both" style="--inner-scale: {{ '%.6f'|format(token_usage_viz.inner_scale) }}">
+                    <div class="token-ruler">
+                        {% for t in token_usage_viz.ticks %}
+                        <span class="token-tick-label tick-total" style="--pct: {{ '%.3f'|format(t.pct) }}">{{ t.label }}</span>
+                        {% endfor %}
+                        {% for t in token_usage_viz.ticks_inner %}
+                        <span class="token-tick-label tick-inner" style="--pct: {{ '%.3f'|format(t.pct) }}">{{ t.label }}</span>
+                        {% endfor %}
+                    </div>
+                    <div class="token-guides">
+                        {% for t in token_usage_viz.ticks %}
+                        <span class="token-guide-line guide-total" style="--pct: {{ '%.3f'|format(t.pct) }}"></span>
+                        {% endfor %}
+                        {% for t in token_usage_viz.ticks_inner %}
+                        <span class="token-guide-line guide-inner" style="--pct: {{ '%.3f'|format(t.pct) }}"></span>
+                        {% endfor %}
+                    </div>
+                    <div class="token-rows">
+                        {% for g in token_usage_viz.groups %}
+                        <div class="token-row">
+                            <a class="token-bar-link" href="#{{ g.group_id }}" title="{{ g.tooltip }}{% if g.duration %} | {{ g.duration }}{% endif %}">
+                                <div class="token-bar-total">
+                                    {% for seg in g.segments %}<span class="token-seg token-seg-{{ seg.kind }}" style="--pct: {{ '%.3f'|format(seg.width_pct) }}"></span>{% endfor %}
+                                </div>
+                                <div class="token-row-label">{{ g.label }} — {{ '{:,}'.format(g.total_sum) }} tokens{% if g.duration %} ({{ g.duration }}){% endif %}</div>
+                            </a>
+                            {% for ib in g.inner_bars %}
+                            <div class="token-inner-wrap{% if ib.kind == 'subagent' %} is-subagent{% endif %}" title="{{ ib.label }} — {{ '{:,}'.format(ib.total_sum) }} tokens">
+                                <span class="token-inner-kind">{% if ib.kind == 'subagent' %}🤖{% endif %}</span>
+                                <div class="token-bar-inner">
+                                    {% for seg in ib.segments %}<span class="token-seg token-seg-{{ seg.kind }}" style="--pct: {{ '%.3f'|format(seg.width_pct) }}"></span>{% endfor %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            <script>
+                (function() {
+                    var viz = document.currentScript.closest('details.token-usage').querySelector('.token-viz');
+                    var btns = document.currentScript.closest('details.token-usage').querySelectorAll('.token-mode-btn');
+                    btns.forEach(function(btn) {
+                        btn.addEventListener('click', function() {
+                            ['both','total','inner'].forEach(function(m) { viz.classList.remove('mode-' + m); });
+                            viz.classList.add('mode-' + btn.dataset.mode);
+                            btns.forEach(function(b) { b.classList.remove('active'); });
+                            btn.classList.add('active');
+                        });
+                    });
+                })();
+            </script>
+        </details>
+        {% endif %}
+
         {% if unified_toc %}
         <nav class="toc">
             <h2>📋 Table of Contents</h2>
@@ -611,6 +979,31 @@
         </nav>
         {% endif %}
 
+        {% if subagent_index %}
+        <div class="subagent-index">
+            <h2>🤖 Subagents ({{ subagent_index | length }})</h2>
+            <ul>
+            {% for sa in subagent_index %}
+                <li>
+                    {% if sa.matched %}
+                    ✅ <strong>{{ sa.agent_type }}</strong>: {{ sa.description or '(no description)' }}
+                    <span class="subagent-id">[{{ sa.agent_id }}]</span>
+                    {% else %}
+                    <details>
+                        <summary>⚠️ <strong>{{ sa.agent_type }}</strong>: {{ sa.description or '(no description)' }}
+                        <span class="subagent-id">[{{ sa.agent_id }}]</span>
+                        <em>(unmatched)</em></summary>
+                        <div class="subagent-content">
+                            {{ sa.content_html | safe }}
+                        </div>
+                    </details>
+                    {% endif %}
+                </li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
         <main>
             {% for conversation in conversations %}
                 {% if conversation.is_section_start and conversation.section_starts %}
@@ -625,7 +1018,7 @@
                 </div>
                 {% endif %}
 
-                <div class="conversation">
+                <div class="conversation"{% if conversation.group_id %} id="{{ conversation.group_id }}"{% endif %}>
                     <div class="message message-user">
                         <div class="message-header">
                             <span class="message-role">👤 User</span>

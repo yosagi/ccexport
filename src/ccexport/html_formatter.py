@@ -42,7 +42,8 @@ class HTMLExtractFormatter:
         min_lines_to_collapse: int = 10,
         summaries: Optional[List[Dict[str, Any]]] = None,
         titles_map: Optional[Dict[int, str]] = None,
-        detail_level: str = 'normal'
+        detail_level: str = 'normal',
+        all_subagents: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Format extracted messages into HTML
@@ -55,6 +56,7 @@ class HTMLExtractFormatter:
             summaries: List of summary entries (for TOC generation)
             titles_map: Title map from osc-tap (index → title)
             detail_level: Output detail level ('text', 'normal', 'full')
+            all_subagents: All subagent data (for subagent index)
 
         Returns:
             HTML string
@@ -93,6 +95,15 @@ class HTMLExtractFormatter:
         total_ms = sum(msg.get('duration_ms', 0) or 0 for msg in messages)
         total_ai_time = format_duration(total_ms) if total_ms > 0 else None
 
+        # Build subagent index
+        subagent_index = self._build_subagent_index(
+            messages, all_subagents or {},
+            collapse_code_blocks, min_lines_to_collapse, detail_level
+        )
+
+        # Build token usage visualization data
+        token_usage_viz = self._build_token_usage_viz(messages, conversations)
+
         # Load and render template
         template = self.jinja_env.get_template('extract.html.j2')
         html = template.render(
@@ -102,10 +113,213 @@ class HTMLExtractFormatter:
             session_count=len(session_ids) if session_ids else None,
             total_ai_time=total_ai_time,
             conversations=conversations,
-            unified_toc=unified_toc
+            unified_toc=unified_toc,
+            subagent_index=subagent_index,
+            token_usage_viz=token_usage_viz
         )
 
         return html
+
+    def _build_token_usage_viz(
+        self,
+        messages: List[Dict[str, Any]],
+        conversations: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Build token usage visualization data for the template.
+
+        Each group becomes a row with:
+        - total bar (4-color stack, scaled to session-wide max)
+        - nested inner bars: one per API call + one per linked subagent
+
+        Returns None if no token_usage data is present on any group.
+        """
+        viz_groups = []
+        conv_map = {c['group_id']: c for c in conversations if c.get('group_id')}
+
+        for idx, msg in enumerate(messages):
+            if msg.get('type') != 'user_instruction_group':
+                continue
+            tu = msg.get('token_usage')
+            if not tu:
+                continue
+            total = tu.get('total', {})
+            total_sum = (
+                (total.get('input_tokens') or 0)
+                + (total.get('cache_creation_input_tokens') or 0)
+                + (total.get('cache_read_input_tokens') or 0)
+                + (total.get('output_tokens') or 0)
+            )
+            if total_sum == 0:
+                continue
+
+            group_anchor = f"group-{idx}"
+            conv = conv_map.get(group_anchor, {})
+
+            viz_groups.append({
+                'group_id': group_anchor,
+                'label': conv.get('timestamp') or self._format_timestamp(
+                    msg.get('timestamp', '')
+                ),
+                'total': total,
+                'total_sum': total_sum,
+                'messages': tu.get('messages', []),
+                'subagents': tu.get('subagents', []),
+                'duration': format_duration(msg.get('duration_ms'))
+                    if msg.get('duration_ms') is not None else None,
+            })
+
+        if not viz_groups:
+            return None
+
+        max_total = max(g['total_sum'] for g in viz_groups)
+        if max_total <= 0:
+            return None
+
+        # First pass: build inner bars with raw totals so we can find max_inner.
+        # Widths are computed as percentage of max_total (the default "both" scale).
+        for g in viz_groups:
+            g['segments'] = self._segments_pct(g['total'], max_total)
+
+            inner = []
+            for m in g['messages']:
+                inner_total = (
+                    (m.get('input_tokens') or 0)
+                    + (m.get('cache_creation_input_tokens') or 0)
+                    + (m.get('cache_read_input_tokens') or 0)
+                    + (m.get('output_tokens') or 0)
+                )
+                if inner_total == 0:
+                    continue
+                inner.append({
+                    'kind': 'api_call',
+                    'label': m.get('model') or 'assistant',
+                    'total_sum': inner_total,
+                    'raw_usage': m,
+                })
+            for sa in g['subagents']:
+                sa_total = sa.get('total', {})
+                sa_sum = (
+                    (sa_total.get('input_tokens') or 0)
+                    + (sa_total.get('cache_creation_input_tokens') or 0)
+                    + (sa_total.get('cache_read_input_tokens') or 0)
+                    + (sa_total.get('output_tokens') or 0)
+                )
+                if sa_sum == 0:
+                    continue
+                name = sa.get('name') or 'subagent'
+                desc = sa.get('description') or ''
+                label = f"🤖 {name}" + (f": {desc}" if desc else '')
+                inner.append({
+                    'kind': 'subagent',
+                    'label': label,
+                    'total_sum': sa_sum,
+                    'raw_usage': sa_total,
+                })
+            g['inner_bars_raw'] = inner
+            g['tooltip'] = self._format_token_tooltip(g['total'], g['total_sum'])
+
+        # max_inner across all inner bars in all groups (for inner-only autoscale)
+        max_inner = 0
+        for g in viz_groups:
+            for ib in g['inner_bars_raw']:
+                if ib['total_sum'] > max_inner:
+                    max_inner = ib['total_sum']
+        if max_inner <= 0:
+            max_inner = max_total  # fallback
+
+        # Finalize inner bars with widths relative to max_total (default scale)
+        for g in viz_groups:
+            g['inner_bars'] = [
+                {
+                    'kind': ib['kind'],
+                    'label': ib['label'],
+                    'total_sum': ib['total_sum'],
+                    'segments': self._segments_pct(ib['raw_usage'], max_total),
+                }
+                for ib in g['inner_bars_raw']
+            ]
+            del g['inner_bars_raw']
+
+        ticks = self._build_ticks(max_total)
+        ticks_inner = self._build_ticks(max_inner)
+
+        # Inner-scale factor: widths given as % of max_total must be multiplied
+        # by this to become % of max_inner (for the inner-only view).
+        inner_scale = max_total / max_inner if max_inner else 1.0
+
+        return {
+            'max_total': max_total,
+            'max_inner': max_inner,
+            'inner_scale': inner_scale,
+            'groups': viz_groups,
+            'ticks': ticks,
+            'ticks_inner': ticks_inner,
+        }
+
+    @staticmethod
+    def _build_ticks(max_total: int) -> List[Dict[str, Any]]:
+        """Pick a nice tick interval and return [{tokens, label, pct}, ...]."""
+        # Aim for 3-6 ticks by picking the smallest "nice" interval that yields ≤6 ticks.
+        candidates = [
+            50_000, 100_000, 200_000, 500_000,
+            1_000_000, 2_000_000, 5_000_000,
+            10_000_000, 20_000_000,
+        ]
+        interval = candidates[-1]
+        for c in candidates:
+            if max_total / c <= 6:
+                interval = c
+                break
+
+        def fmt(n: int) -> str:
+            if n >= 1_000_000:
+                val = n / 1_000_000
+                return f"{val:.1f}M".replace('.0M', 'M')
+            return f"{n // 1_000}k"
+
+        ticks: List[Dict[str, Any]] = []
+        t = interval
+        while t <= max_total:
+            ticks.append({
+                'tokens': t,
+                'label': fmt(t),
+                'pct': (t / max_total) * 100.0,
+            })
+            t += interval
+        return ticks
+
+    @staticmethod
+    def _segments_pct(usage: Dict[str, Any], max_total: int) -> List[Dict[str, Any]]:
+        """Return 4-segment list (kind, tokens, width_pct) ordered for stacking."""
+        order = [
+            ('cache_read', 'cache_read_input_tokens'),
+            ('input', 'input_tokens'),
+            ('cache_create', 'cache_creation_input_tokens'),
+            ('output', 'output_tokens'),
+        ]
+        segments = []
+        for kind, key in order:
+            tokens = int(usage.get(key) or 0)
+            if tokens <= 0:
+                continue
+            segments.append({
+                'kind': kind,
+                'tokens': tokens,
+                'width_pct': (tokens / max_total) * 100.0,
+            })
+        return segments
+
+    @staticmethod
+    def _format_token_tooltip(total: Dict[str, Any], total_sum: int) -> str:
+        parts = [
+            f"total: {total_sum:,}",
+            f"input: {int(total.get('input_tokens') or 0):,}",
+            f"cache_create: {int(total.get('cache_creation_input_tokens') or 0):,}",
+            f"cache_read: {int(total.get('cache_read_input_tokens') or 0):,}",
+            f"output: {int(total.get('output_tokens') or 0):,}",
+        ]
+        return ' | '.join(parts)
 
     def _prepare_conversations(
         self,
@@ -203,7 +417,9 @@ class HTMLExtractFormatter:
 
                 # Build conversation data
                 duration_ms = msg.get('duration_ms')
+                group_anchor = f"group-{len(conversations)}"
                 conversation_data = {
+                    'group_id': group_anchor,
                     'session_id': session_id,
                     'session_change': session_change,
                     'timestamp': self._format_timestamp(timestamp),
@@ -290,13 +506,40 @@ class HTMLExtractFormatter:
                 error_class = ' tool-error' if is_error else ''
                 error_marker = ' <span class="tool-error-marker">❌</span>' if is_error else ''
 
-                if detail_level == 'full':
+                # Subagent content
+                subagent_groups = ci.get('subagent_groups')
+                if subagent_groups:
+                    meta = ci.get('subagent_meta', {})
+                    agent_label = meta.get('description') or summary_text
+                    agent_type = meta.get('agent_type', '')
+                    if agent_type:
+                        agent_label = f"{agent_type}: {agent_label}"
+
+                    parts.append(f'<details class="subagent-inline">')
+                    parts.append(f'<summary>🤖 {html_module.escape(agent_label)}</summary>')
+                    parts.append('<div class="subagent-content">')
+                    parts.append(self._render_subagent_groups_html(
+                        subagent_groups, detail_level,
+                        collapse_code_blocks, min_lines_to_collapse
+                    ))
+                    parts.append('</div>')
+                    parts.append('</details>')
+                elif detail_level == 'full':
                     structured = ci.get('structured_result', {})
                     result_content = ci.get('tool_result_content', '')
+                    tool_input = ci.get('input', {})
 
-                    if structured.get('resultPatch') or result_content:
+                    # Show full command for Bash tool
+                    full_command = ''
+                    if ci.get('name') == 'Bash' and tool_input.get('command'):
+                        full_command = tool_input['command']
+
+                    if structured.get('resultPatch') or result_content or full_command:
                         parts.append(f'<details class="tool-inline{error_class}">')
                         parts.append(f'<summary>🔧 {summary_text}{error_marker}</summary>')
+
+                        if full_command:
+                            parts.append(f'<pre class="tool-command">{html_module.escape(full_command)}</pre>')
 
                         if structured.get('resultPatch'):
                             patch = html_module.escape(structured['resultPatch'])
@@ -314,6 +557,93 @@ class HTMLExtractFormatter:
                     parts.append(f'<div class="tool-inline{error_class}">🔧 {summary_text}{error_marker}</div>')
 
         return '\n'.join(parts)
+
+    def _render_subagent_groups_html(
+        self,
+        groups: list,
+        detail_level: str,
+        collapse_code_blocks: bool,
+        min_lines_to_collapse: int
+    ) -> str:
+        """Render subagent conversation groups as HTML"""
+        import html as html_module
+        parts = []
+
+        for group in groups:
+            # User message
+            user_msg = group.get('user_message', {})
+            user_content = user_msg.get('content', '')
+            if user_content.strip():
+                # Truncate long prompts
+                if len(user_content) > 500:
+                    user_content = user_content[:500] + '\n... (truncated)'
+                parts.append(f'<div class="subagent-user"><strong>Prompt:</strong>')
+                parts.append(self._convert_markdown_to_html(
+                    user_content, collapse_code_blocks, min_lines_to_collapse
+                ))
+                parts.append('</div>')
+
+            # Assistant messages
+            for assistant_msg in group.get('assistant_messages', []):
+                content_items = assistant_msg.get('content_items')
+                if content_items and detail_level != 'text':
+                    parts.append(self._render_content_items_html(
+                        content_items, detail_level,
+                        collapse_code_blocks, min_lines_to_collapse
+                    ))
+                else:
+                    content = assistant_msg.get('content', '')
+                    if content.strip():
+                        parts.append(self._convert_markdown_to_html(
+                            content, collapse_code_blocks, min_lines_to_collapse
+                        ))
+
+        return '\n'.join(parts)
+
+    def _build_subagent_index(
+        self,
+        messages: list,
+        all_subagents: dict,
+        collapse_code_blocks: bool,
+        min_lines_to_collapse: int,
+        detail_level: str
+    ) -> list:
+        """
+        Build subagent index for display in HTML header.
+
+        Returns list of dicts: {agent_id, agent_type, description, matched, content_html}
+        All subagents are listed; unmatched ones include embedded content.
+        """
+        if not all_subagents:
+            return []
+
+        # Collect matched agent IDs from content_items
+        matched_ids = set()
+        for group in messages:
+            for ci in group.get('combined_content_items', []):
+                if ci.get('subagent_id'):
+                    matched_ids.add(ci['subagent_id'])
+
+        index = []
+        for agent_id, sa in all_subagents.items():
+            entry = {
+                'agent_id': agent_id[:8],
+                'agent_type': sa['agent_type'],
+                'description': sa['description'],
+                'matched': agent_id in matched_ids,
+                'content_html': '',
+            }
+
+            if agent_id not in matched_ids:
+                # Render unmatched subagent content for embedding
+                entry['content_html'] = self._render_subagent_groups_html(
+                    sa['groups'], detail_level,
+                    collapse_code_blocks, min_lines_to_collapse
+                )
+
+            index.append(entry)
+
+        return index
 
     def _format_tool_usage_html(
         self,

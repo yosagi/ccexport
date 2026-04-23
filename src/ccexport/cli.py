@@ -11,10 +11,17 @@ import json
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from importlib.metadata import version as _pkg_version, PackageNotFoundError
 from pathlib import Path
 from typing import Optional
 
 import click
+
+
+try:
+    CCEXPORT_VERSION = _pkg_version("ccexport")
+except PackageNotFoundError:
+    CCEXPORT_VERSION = "unknown"
 
 from .config import Config
 from .extractor import MessageExtractor
@@ -23,6 +30,7 @@ from .osc_tap_loader import get_titles_for_export
 
 
 @click.group()
+@click.version_option(package_name="ccexport")
 def cli():
     """Claude Code conversation export tool"""
     pass
@@ -101,6 +109,21 @@ def export(session: str, output: str, output_format: str,
 
         summaries = all_summaries
         debug(f"Summaries: {len(summaries)} items")
+
+        # Load subagent data
+        all_subagents = {}
+        tool_use_map = {}
+        if detail_level != 'text':
+            t0 = time.time()
+            all_subagents = extractor.load_subagents(project_name, full_session_id)
+            if all_subagents:
+                tool_use_map = extractor._build_tool_use_to_agent_map(
+                    project_name, full_session_id)
+                extractor.enrich_subagent_data(messages, all_subagents, tool_use_map)
+                debug(f"Subagents: {time.time() - t0:.3f}s ({len(all_subagents)} agents, {len(tool_use_map)} matched)")
+
+        # Compute per-group token usage (also folds in subagent totals)
+        extractor.compute_token_usage(messages, all_subagents, tool_use_map)
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -132,7 +155,8 @@ def export(session: str, output: str, output_format: str,
     output_path = Path(output)
     content = _format_messages(messages, project_name, output_format, config,
                                summaries, titles_map, detail_level,
-                               output_path=output_path)
+                               output_path=output_path,
+                               all_subagents=all_subagents)
     debug(f"Format conversion ({output_format}): {time.time() - t0:.3f}s")
 
     # 6. Write to file
@@ -171,10 +195,30 @@ def projects(as_json: bool):
 @cli.command()
 @click.option('--project', '-p', required=True, help='Project name')
 @click.option('--json', 'as_json', is_flag=True, help='Output in JSON format')
-def sessions(project: str, as_json: bool):
+@click.option('--quick', '-q', is_flag=True, help='List session IDs only (no JSONL parsing, fast)')
+def sessions(project: str, as_json: bool, quick: bool):
     """List sessions in a project"""
     config = Config()
     extractor = MessageExtractor(config.projects_dir, config)
+
+    if quick:
+        try:
+            session_list = extractor.list_session_ids(project)
+        except FileNotFoundError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        if as_json:
+            click.echo(json.dumps(session_list, ensure_ascii=False))
+        else:
+            if not session_list:
+                click.echo(f"No sessions found: {project}")
+                return
+            click.echo(f"Sessions ({len(session_list)}):")
+            for s in session_list:
+                start = s['start_time'][:16] if s.get('start_time') else 'N/A'
+                click.echo(f"  {s['session_id'][:8]} ...  {start}")
+        return
 
     try:
         session_list = extractor.get_session_info(project)
@@ -229,6 +273,11 @@ def session_info(session: str, as_json: bool, verbose: bool):
             info["end_time"] = session_detail.get("end_time")
             info["turn_count"] = session_detail.get("turn_count", 0)
             info["message_count"] = session_detail.get("message_count", 0)
+            info["session_type"] = session_detail.get("session_type", "interactive")
+            if session_detail.get("has_duration_data"):
+                info["total_duration_ms"] = session_detail.get("total_duration_ms", 0)
+            else:
+                info["total_duration_ms"] = None
 
     if as_json:
         click.echo(json.dumps(info, ensure_ascii=False, indent=2))
@@ -241,6 +290,9 @@ def session_info(session: str, as_json: bool, verbose: bool):
             click.echo(f"End time: {info['end_time']}")
             click.echo(f"Turn count: {info['turn_count']}")
             click.echo(f"Message count: {info['message_count']}")
+            click.echo(f"Session type: {info['session_type']}")
+            duration = info['total_duration_ms']
+            click.echo(f"Total duration: {duration}ms" if duration is not None else "Total duration: N/A")
 
 
 DEFAULT_NAME_TEMPLATE = "{project}_{date}_{session}.{ext}"
@@ -448,6 +500,9 @@ def _export_single_session(
 
     debug(f"Messages: {len(all_messages)} raw, {len(messages)} groups")
 
+    # Token usage per group (batch path does not load subagents)
+    extractor.compute_token_usage(messages)
+
     # Get title map (osc-tap)
     titles_map = {}
     if titles_dir:
@@ -475,7 +530,8 @@ def _format_messages(messages: list, project_name: str,
                     summaries: list = None,
                     titles_map: dict = None,
                     detail_level: str = 'normal',
-                    output_path: Path = None) -> str:
+                    output_path: Path = None,
+                    all_subagents: dict = None) -> str:
     """Format messages"""
     if titles_map is None:
         titles_map = {}
@@ -489,23 +545,27 @@ def _format_messages(messages: list, project_name: str,
             min_lines_to_collapse=10,
             summaries=summaries,
             titles_map=titles_map,
-            detail_level=detail_level
+            detail_level=detail_level,
+            all_subagents=all_subagents
         )
     elif output_format == 'md':
         from .md_formatter import format_as_markdown
         return format_as_markdown(messages, project_name, grouped=True,
                                   summaries=summaries, titles_map=titles_map,
                                   detail_level=detail_level,
-                                  output_path=output_path)
+                                  output_path=output_path,
+                                  all_subagents=all_subagents)
     elif output_format == 'org':
         from .org_formatter import OrgFormatter
         formatter = OrgFormatter(config)
         return formatter.format_extract(messages, project_name,
                                         summaries=summaries, titles_map=titles_map,
                                         detail_level=detail_level,
-                                        output_path=output_path)
+                                        output_path=output_path,
+                                        all_subagents=all_subagents)
     elif output_format == 'json':
         output = {
+            'ccexport_version': CCEXPORT_VERSION,
             'project_name': project_name,
             'messages': messages,
             'summaries': summaries or [],
