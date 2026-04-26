@@ -124,6 +124,30 @@ def export(session: str, output: str, output_format: str,
 
         # Compute per-group token usage (also folds in subagent totals)
         extractor.compute_token_usage(messages, all_subagents, tool_use_map)
+
+        # Origin-mode estimate sanity check.
+        est_stats = extractor.summarize_origin_estimates(messages)
+        if est_stats:
+            o = est_stats.get('output_ratio')
+            if o:
+                click.echo(
+                    f"Origin output-side ratio (est / output_tokens) over "
+                    f"{o['count']} API calls: "
+                    f"min={o['min']:.2f} p25={o['p25']:.2f} "
+                    f"median={o['median']:.2f} p75={o['p75']:.2f} "
+                    f"p95={o['p95']:.2f} max={o['max']:.2f}",
+                    err=True,
+                )
+            b = est_stats.get('bar_scale')
+            if b:
+                click.echo(
+                    f"Origin bar scale (budget / 5-cat sum) over "
+                    f"{b['count']} API calls: "
+                    f"min={b['min']:.2f} p25={b['p25']:.2f} "
+                    f"median={b['median']:.2f} p75={b['p75']:.2f} "
+                    f"p95={b['p95']:.2f} max={b['max']:.2f}",
+                    err=True,
+                )
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

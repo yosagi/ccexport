@@ -678,6 +678,33 @@
         .token-seg-input       { background: #74b72e; }
         .token-seg-cache_create{ background: #e67e22; }
         .token-seg-output      { background: #34495e; }
+        .token-seg-origin_prompt      { background: #2980b9; }
+        .token-seg-origin_tool_result { background: #8d6e63; }
+        .token-seg-origin_thinking    { background: #9b59b6; }
+        .token-seg-origin_text        { background: #16a085; }
+        .token-seg-origin_tool_use    { background: #d35400; }
+        .token-seg-origin_system  { background: #95a5a6; }
+        .token-seg-na { background: repeating-linear-gradient(45deg, #d0d3d6, #d0d3d6 4px, #e2e5e8 4px, #e2e5e8 8px); }
+
+        /* View toggle: 4-component vs origin breakdown.
+           A `.view-origin` class on details.token-usage swaps which set of
+           segments / legend / scale notes is visible. Default is 4-component.
+           seg-4comp / seg-origin wrappers use display:contents so their
+           children (token-seg) become flex items of the bar; toggling to
+           display:none hides the whole subtree. */
+        .token-usage .seg-4comp { display: contents; }
+        .token-usage .seg-origin { display: none; }
+        .token-usage.view-origin .seg-4comp { display: none; }
+        .token-usage.view-origin .seg-origin { display: contents; }
+        .token-usage .legend-origin-item { display: none; }
+        .token-usage.view-origin .legend-4comp-item { display: none; }
+        .token-usage.view-origin .legend-origin-item { display: inline-flex; }
+        .token-usage .note-origin { display: none; }
+        .token-usage.view-origin .note-both,
+        .token-usage.view-origin .note-inner { display: none; }
+        .token-usage.view-origin .note-origin { display: inline; }
+        .token-origin-banner { display: none; font-size: 0.7rem; color: #856404; background: #fff8dc; border: 1px solid #f0e0a0; padding: 0.25rem 0.5rem; border-radius: 3px; margin: 0.25rem 0 0.5rem; }
+        .token-usage.view-origin .token-origin-banner { display: block; }
 
         .token-scale-note {
             font-size: 0.75rem;
@@ -888,20 +915,32 @@
             <summary>📊 Token Usage ({{ token_usage_viz.groups | length }} groups, max {{ '{:,}'.format(token_usage_viz.max_total) }} tokens)</summary>
             <div class="token-usage-inner">
                 <div class="token-legend">
-                    <span class="token-legend-item"><span class="token-swatch token-seg-cache_read"></span>cache_read</span>
-                    <span class="token-legend-item"><span class="token-swatch token-seg-input"></span>input</span>
-                    <span class="token-legend-item"><span class="token-swatch token-seg-cache_create"></span>cache_create</span>
-                    <span class="token-legend-item"><span class="token-swatch token-seg-output"></span>output</span>
+                    <span class="token-legend-item legend-4comp-item"><span class="token-swatch token-seg-cache_read"></span>cache_read</span>
+                    <span class="token-legend-item legend-4comp-item"><span class="token-swatch token-seg-input"></span>input</span>
+                    <span class="token-legend-item legend-4comp-item"><span class="token-swatch token-seg-cache_create"></span>cache_create</span>
+                    <span class="token-legend-item legend-4comp-item"><span class="token-swatch token-seg-output"></span>output</span>
+                    <span class="token-legend-item legend-origin-item"><span class="token-swatch token-seg-origin_prompt"></span>prompt</span>
+                    <span class="token-legend-item legend-origin-item"><span class="token-swatch token-seg-origin_tool_result"></span>tool_result</span>
+                    <span class="token-legend-item legend-origin-item"><span class="token-swatch token-seg-origin_thinking"></span>thinking</span>
+                    <span class="token-legend-item legend-origin-item"><span class="token-swatch token-seg-origin_text"></span>text</span>
+                    <span class="token-legend-item legend-origin-item"><span class="token-swatch token-seg-origin_tool_use"></span>tool_use</span>
+                    <span class="token-legend-item legend-origin-item" title="Claude Code system prompt + tools + memory + skills + custom agents — paid once at session start, then re-counted via cache_read each call"><span class="token-swatch token-seg-origin_system"></span>system</span>
                 </div>
-                <div class="token-mode-toggle" role="tablist">
+                <div class="token-mode-toggle" role="tablist" aria-label="Visibility mode">
                     <button type="button" class="token-mode-btn active" data-mode="both">Both</button>
                     <button type="button" class="token-mode-btn" data-mode="total">Total only</button>
                     <button type="button" class="token-mode-btn" data-mode="inner">Inner only</button>
                 </div>
+                <div class="token-mode-toggle token-view-toggle" role="tablist" aria-label="Breakdown mode" style="margin-left: 0.5rem;">
+                    <button type="button" class="token-mode-btn active" data-view="4comp">4-component</button>
+                    <button type="button" class="token-mode-btn" data-view="origin">Origin</button>
+                </div>
                 <div class="token-scale-note">
                     <span class="note-both">scale: 100% = {{ '{:,}'.format(token_usage_viz.max_total) }} tokens (session max)</span>
                     <span class="note-inner">scale: 100% = {{ '{:,}'.format(token_usage_viz.max_inner) }} tokens (largest inner bar)</span>
+                    <span class="note-origin">scale: 100% = {{ '{:,}'.format(token_usage_viz.max_total) }} tokens. Each origin bar fills the same width as its 4-component counterpart. <em>system</em> = the fixed Claude Code header (prompt + tools + memory + skills + agents), measured as the residual on the very first API call.</span>
                 </div>
+                <div class="token-origin-banner">⚠️ origin breakdown: user input measured via cache delta; output decomposition proportioned from tiktoken ratios to API totals. First API call uses tiktoken fallback. Bars are cumulative per API call; group bars sum their inner bars.</div>
                 <div class="token-viz mode-both" style="--inner-scale: {{ '%.6f'|format(token_usage_viz.inner_scale) }}">
                     <div class="token-ruler">
                         {% for t in token_usage_viz.ticks %}
@@ -922,9 +961,18 @@
                     <div class="token-rows">
                         {% for g in token_usage_viz.groups %}
                         <div class="token-row">
-                            <a class="token-bar-link" href="#{{ g.group_id }}" title="{{ g.tooltip }}{% if g.duration %} | {{ g.duration }}{% endif %}">
+                            <a class="token-bar-link" href="#{{ g.group_id }}" title="{{ g.tooltip }}{% if g.duration %} | {{ g.duration }}{% endif %}" data-origin-title="{{ g.origin_tooltip }}{% if g.duration %} | {{ g.duration }}{% endif %}">
                                 <div class="token-bar-total">
-                                    {% for seg in g.segments %}<span class="token-seg token-seg-{{ seg.kind }}" style="--pct: {{ '%.3f'|format(seg.width_pct) }}"></span>{% endfor %}
+                                    <span class="seg-4comp">
+                                        {% for seg in g.segments %}<span class="token-seg token-seg-{{ seg.kind }}" style="--pct: {{ '%.3f'|format(seg.width_pct) }}"></span>{% endfor %}
+                                    </span>
+                                    <span class="seg-origin">
+                                        {% if g.origin_format == 'old' %}
+                                        <span class="token-seg token-seg-na" style="--pct: 100" title="legacy format — origin not available"></span>
+                                        {% else %}
+                                        {% for seg in g.origin_segments %}<span class="token-seg token-seg-{{ seg.kind }}" style="--pct: {{ '%.3f'|format(seg.width_pct) }}"></span>{% endfor %}
+                                        {% endif %}
+                                    </span>
                                 </div>
                                 <div class="token-row-label">{{ g.label }} — {{ '{:,}'.format(g.total_sum) }} tokens{% if g.duration %} ({{ g.duration }}){% endif %}</div>
                             </a>
@@ -932,7 +980,20 @@
                             <div class="token-inner-wrap{% if ib.kind == 'subagent' %} is-subagent{% endif %}" title="{{ ib.label }} — {{ '{:,}'.format(ib.total_sum) }} tokens">
                                 <span class="token-inner-kind">{% if ib.kind == 'subagent' %}🤖{% endif %}</span>
                                 <div class="token-bar-inner">
-                                    {% for seg in ib.segments %}<span class="token-seg token-seg-{{ seg.kind }}" style="--pct: {{ '%.3f'|format(seg.width_pct) }}"></span>{% endfor %}
+                                    <span class="seg-4comp">
+                                        {% for seg in ib.segments %}<span class="token-seg token-seg-{{ seg.kind }}" style="--pct: {{ '%.3f'|format(seg.width_pct) }}"></span>{% endfor %}
+                                    </span>
+                                    <span class="seg-origin">
+                                        {% if ib.format == 'old' or not ib.origin_segments %}
+                                        {% if ib.kind == 'subagent' %}
+                                        <span class="token-seg token-seg-na" style="--pct: 100" title="subagent origin not decomposed"></span>
+                                        {% else %}
+                                        <span class="token-seg token-seg-na" style="--pct: 100" title="legacy format"></span>
+                                        {% endif %}
+                                        {% else %}
+                                        {% for seg in ib.origin_segments %}<span class="token-seg token-seg-{{ seg.kind }}" style="--pct: {{ '%.3f'|format(seg.width_pct) }}"></span>{% endfor %}
+                                        {% endif %}
+                                    </span>
                                 </div>
                             </div>
                             {% endfor %}
@@ -943,13 +1004,36 @@
             </div>
             <script>
                 (function() {
-                    var viz = document.currentScript.closest('details.token-usage').querySelector('.token-viz');
-                    var btns = document.currentScript.closest('details.token-usage').querySelectorAll('.token-mode-btn');
-                    btns.forEach(function(btn) {
+                    var details = document.currentScript.closest('details.token-usage');
+                    var viz = details.querySelector('.token-viz');
+                    // Visibility-mode toggle (Both / Total only / Inner only)
+                    var modeBtns = details.querySelectorAll('.token-mode-toggle:not(.token-view-toggle) .token-mode-btn');
+                    modeBtns.forEach(function(btn) {
                         btn.addEventListener('click', function() {
                             ['both','total','inner'].forEach(function(m) { viz.classList.remove('mode-' + m); });
                             viz.classList.add('mode-' + btn.dataset.mode);
-                            btns.forEach(function(b) { b.classList.remove('active'); });
+                            modeBtns.forEach(function(b) { b.classList.remove('active'); });
+                            btn.classList.add('active');
+                        });
+                    });
+                    // Breakdown-view toggle (4-component / Origin)
+                    var viewBtns = details.querySelectorAll('.token-view-toggle .token-mode-btn');
+                    var links = details.querySelectorAll('.token-bar-link');
+                    viewBtns.forEach(function(btn) {
+                        btn.addEventListener('click', function() {
+                            if (btn.dataset.view === 'origin') {
+                                details.classList.add('view-origin');
+                                links.forEach(function(a) {
+                                    var t = a.dataset.originTitle;
+                                    if (t) { a.dataset.fourTitle = a.getAttribute('title') || ''; a.setAttribute('title', t); }
+                                });
+                            } else {
+                                details.classList.remove('view-origin');
+                                links.forEach(function(a) {
+                                    if (a.dataset.fourTitle !== undefined) { a.setAttribute('title', a.dataset.fourTitle); }
+                                });
+                            }
+                            viewBtns.forEach(function(b) { b.classList.remove('active'); });
                             btn.classList.add('active');
                         });
                     });

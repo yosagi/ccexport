@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Set, Tuple
 
 from .parser import SessionParser, SessionDAG, MessageNode, SummaryEntry
+from . import token_origin as _origin
 
 
 class MessageExtractor:
@@ -652,11 +653,13 @@ class MessageExtractor:
                 if isinstance(content, list):
                     text_parts = []
                     content_items = []  # Ordered list of text/tool_use items
+                    tool_results = []   # tool_result content blocks (user msgs)
                     has_tool_use = False
                     for item in content:
                         if isinstance(item, dict):
+                            item_type = item.get('type')
                             # Collect tool_use items (preserve order)
-                            if item.get('type') == 'tool_use':
+                            if item_type == 'tool_use':
                                 has_tool_use = True
                                 content_items.append({
                                     'type': 'tool_use',
@@ -665,8 +668,25 @@ class MessageExtractor:
                                     'input': item.get('input', {}),
                                 })
                                 continue  # Don't include in text
+                            # Capture thinking blocks for token-origin estimation
+                            elif item_type == 'thinking':
+                                thinking_text = item.get('thinking') or ''
+                                signature = item.get('signature') or ''
+                                content_items.append({
+                                    'type': 'thinking',
+                                    'text': thinking_text,
+                                    'signature_chars': len(signature),
+                                })
+                            # redacted_thinking has only the encrypted blob
+                            elif item_type == 'redacted_thinking':
+                                data = item.get('data') or ''
+                                content_items.append({
+                                    'type': 'thinking',
+                                    'text': '',
+                                    'signature_chars': len(data),
+                                })
                             # Extract text type
-                            elif item.get('type') == 'text':
+                            elif item_type == 'text':
                                 text = item.get('text', '')
                                 text_parts.append(text)
                                 content_items.append({
@@ -674,7 +694,7 @@ class MessageExtractor:
                                     'content': text,
                                 })
                             # Extract image type (base64 embedded images)
-                            elif item.get('type') == 'image':
+                            elif item_type == 'image':
                                 source = item.get('source', {})
                                 if source.get('type') == 'base64' and source.get('data'):
                                     content_items.append({
@@ -682,9 +702,25 @@ class MessageExtractor:
                                         'media_type': source.get('media_type', 'image/png'),
                                         'data': source.get('data'),
                                     })
-                            # Skip tool_result type (exclude verbose tool output)
-                            # Plan approval info is handled separately in approved_plan field
-                            elif item.get('type') == 'tool_result':
+                            # tool_result on user messages: keep raw text for
+                            # input-side origin estimation; do not surface in
+                            # content_items (verbose, not user-facing).
+                            elif item_type == 'tool_result':
+                                raw_content = item.get('content', '')
+                                if isinstance(raw_content, str):
+                                    tr_text = raw_content
+                                elif isinstance(raw_content, list):
+                                    parts = []
+                                    for part in raw_content:
+                                        if isinstance(part, dict) and part.get('type') == 'text':
+                                            parts.append(part.get('text', ''))
+                                    tr_text = '\n'.join(parts)
+                                else:
+                                    tr_text = ''
+                                tool_results.append({
+                                    'tool_use_id': item.get('tool_use_id'),
+                                    'content': tr_text,
+                                })
                                 continue
 
                     processed['content'] = '\n'.join(text_parts)
@@ -693,6 +729,10 @@ class MessageExtractor:
                     # Always include content_items (even text-only) for JSON consumers
                     if content_items:
                         processed['content_items'] = content_items
+
+                    # Store tool_result blocks for input-side origin estimation
+                    if tool_results:
+                        processed['tool_results'] = tool_results
                 else:
                     processed['content'] = str(content)
             else:
@@ -1989,23 +2029,54 @@ class MessageExtractor:
         for group in grouped_messages:
             group_total = self._empty_usage()
             per_message: List[Dict[str, Any]] = []
-            seen_msg_ids: Set[str] = set()
 
+            # Aggregate assistant_messages by API call (message_id). The new
+            # JSONL format records one line per content block (thinking, text,
+            # tool_use) sharing the same message_id and usage. Origin
+            # estimation needs all blocks, so we merge first and dedup later.
+            calls: "Dict[Optional[str], Dict[str, Any]]" = {}
+            call_order: List[Optional[str]] = []
             for msg in group.get('assistant_messages', []):
                 usage = msg.get('usage')
                 if not isinstance(usage, dict):
                     continue
                 msg_id = msg.get('message_id')
-                if msg_id and msg_id in seen_msg_ids:
-                    # Same API call already counted; skip duplicate content-block entry
-                    continue
-                if msg_id:
-                    seen_msg_ids.add(msg_id)
-                self._accumulate_usage(group_total, usage)
-                rec = self._extract_message_usage(usage)
-                rec['model'] = msg.get('model')
-                rec['timestamp'] = msg.get('timestamp')
-                rec['message_id'] = msg_id
+                key = msg_id if msg_id else f"_no_id_{id(msg)}"
+                if key not in calls:
+                    calls[key] = {
+                        'message_id': msg_id,
+                        'usage': usage,
+                        'model': msg.get('model'),
+                        'timestamp': msg.get('timestamp'),
+                        'output_tokens_seen': [],
+                        'content_items': [],
+                    }
+                    call_order.append(key)
+                ot = usage.get('output_tokens')
+                if ot is not None:
+                    calls[key]['output_tokens_seen'].append(int(ot))
+                for ci in msg.get('content_items', []) or []:
+                    calls[key]['content_items'].append(ci)
+
+            for key in call_order:
+                call = calls[key]
+                self._accumulate_usage(group_total, call['usage'])
+                rec = self._extract_message_usage(call['usage'])
+                rec['model'] = call['model']
+                rec['timestamp'] = call['timestamp']
+                rec['message_id'] = call['message_id']
+
+                fmt = _origin.detect_format(call['output_tokens_seen'])
+                rec['format'] = fmt
+                if fmt == 'new':
+                    raw = _origin.compute_assistant_origin(
+                        call['content_items']
+                    )
+                    ot = int(call['usage'].get('output_tokens') or 0)
+                    rec['origin'] = _origin.scale_assistant_origin(raw, ot)
+                    rec['origin_raw'] = raw
+                else:
+                    rec['origin'] = None
                 per_message.append(rec)
 
             # Linked subagents (via tool_use_id on this group's tool_use items)
@@ -2031,9 +2102,261 @@ class MessageExtractor:
                     'total': dict(sa_info['total']),
                 })
 
+            # Aggregate origin breakdown across all API calls in this group.
+            # Skip groups with any old-format call (we cannot decompose those).
+            origin_total: Optional[Dict[str, int]] = None
+            has_old_format = any(
+                m.get('format') == 'old' for m in per_message
+            )
+            if per_message and not has_old_format:
+                origin_total = {'thinking': 0, 'text': 0, 'tool_use': 0}
+                for m in per_message:
+                    o = m.get('origin') or {}
+                    origin_total['thinking'] += o.get('thinking', 0)
+                    origin_total['text'] += o.get('text', 0)
+                    origin_total['tool_use'] += o.get('tool_use', 0)
+
+            # User-side origin: user prompt text + tool_result text from any
+            # tool calls executed during this group. Conceptually these are
+            # the input-side tokens this group contributes to context: the
+            # user's typed message (this group's user_message) plus tool
+            # results that the assistant's tool_use calls produced (which
+            # become input for the next API call but are best attributed to
+            # the group that triggered them).
+            user_msg = group.get('user_message', {}) or {}
+            tr_items = []
+            # Direct tool_result blocks on the user message (rare: continuing
+            # forks or specific tool_result-only user messages).
+            for tr in user_msg.get('tool_results', []) or []:
+                tr_items.append(tr)
+            # Tool results attached to this group's assistant tool_use calls.
+            for ci in group.get('combined_content_items', []) or []:
+                if ci.get('type') != 'tool_use':
+                    continue
+                trc = ci.get('tool_result_content')
+                if trc:
+                    tr_items.append({'content': trc})
+            user_origin = _origin.compute_user_origin(
+                user_msg.get('content', ''),
+                tr_items,
+            )
+
             group['token_usage'] = {
                 'total': group_total,
                 'messages': per_message,
                 'subagents': group_subagents,
+                'origin_total': origin_total,
+                'origin_user': user_origin,
+                'origin_format': 'old' if has_old_format else 'new',
             }
+
+        # Second pass: per-call cumulative origin using cache-delta
+        # measurement for user input and per-call scaled output.
+        #
+        # Between consecutive API calls N and N+1 (no cache loss):
+        #   user_delta = total_input_{N+1} - total_input_N - output_N
+        # This directly measures user-contributed tokens (prompt or
+        # tool_result) without tiktoken.  Output-side categories
+        # (thinking/text/tool_use) were already scaled in Phase 1 to
+        # sum exactly to output_tokens.
+        #
+        # First call of session (prev_total_input is None) falls back
+        # to tiktoken because system prompt and user input are mixed in
+        # cache_creation.  Cache-loss transitions (negative delta) also
+        # fall back to tiktoken.
+        cum = {
+            'thinking': 0, 'text': 0, 'tool_use': 0,
+            'prompt': 0, 'tool_result': 0,
+        }
+        prev_total_input: Optional[int] = None
+        prev_output: Optional[int] = None
+        for group in grouped_messages:
+            tu = group.get('token_usage')
+            if not tu:
+                continue
+            if tu.get('origin_format') == 'old':
+                for m in tu.get('messages', []):
+                    m['origin_cumulative'] = None
+                    m['origin_method'] = None
+                tu['origin_total_cumulative'] = None
+                continue
+            tiktoken_user = tu.get('origin_user') or {}
+            tiktoken_prompt = tiktoken_user.get('prompt', 0)
+            tiktoken_tr = tiktoken_user.get('tool_result', 0)
+            is_first_call_of_group = True
+            group_fallback_applied = False
+            group_total_cum = {
+                'thinking': 0, 'text': 0, 'tool_use': 0,
+                'prompt': 0, 'tool_result': 0,
+            }
+            for m in tu.get('messages', []):
+                call_total_input = (
+                    int(m.get('input_tokens') or 0)
+                    + int(m.get('cache_creation_input_tokens') or 0)
+                    + int(m.get('cache_read_input_tokens') or 0)
+                )
+                call_output = int(m.get('output_tokens') or 0)
+                use_delta = False
+                if prev_total_input is not None and prev_output is not None:
+                    delta = call_total_input - prev_total_input - prev_output
+                    if delta >= 0:
+                        use_delta = True
+                if use_delta:
+                    if is_first_call_of_group:
+                        cum['prompt'] += delta
+                    else:
+                        cum['tool_result'] += delta
+                    m['origin_method'] = 'cache_delta'
+                else:
+                    if is_first_call_of_group and not group_fallback_applied:
+                        cum['prompt'] += tiktoken_prompt
+                        cum['tool_result'] += tiktoken_tr
+                        group_fallback_applied = True
+                    m['origin_method'] = 'tiktoken_fallback'
+                o = m.get('origin') or {}
+                cum['thinking'] += o.get('thinking', 0)
+                cum['text'] += o.get('text', 0)
+                cum['tool_use'] += o.get('tool_use', 0)
+                m['origin_cumulative'] = dict(cum)
+                for k in group_total_cum:
+                    group_total_cum[k] += cum[k]
+                prev_total_input = call_total_input
+                prev_output = call_output
+                is_first_call_of_group = False
+            tu['origin_total_cumulative'] = group_total_cum
+
+        # Third pass: compute ``system`` — the fixed Claude Code header
+        # (system prompt + tools + memory + skills), paid once at
+        # session start and re-counted via cache_read each call.
+        #
+        # system_init = total_input_first - tiktoken(user_first).
+        # Because output_tokens is excluded from this formula, output-
+        # side tiktoken bias does not contaminate the system estimate.
+        #
+        # With cache-delta measurement, overhead (= inner_total minus
+        # 5-cat cumulative) equals system_init for every normal call,
+        # so there is no separate "notice" residual.
+        system_init: Optional[int] = None
+        for group in grouped_messages:
+            tu = group.get('token_usage')
+            if not tu or tu.get('origin_format') == 'old':
+                continue
+            msgs = tu.get('messages', [])
+            if not msgs:
+                continue
+            first = msgs[0]
+            first_total_input = (
+                int(first.get('input_tokens') or 0)
+                + int(first.get('cache_creation_input_tokens') or 0)
+                + int(first.get('cache_read_input_tokens') or 0)
+            )
+            usr = tu.get('origin_user') or {}
+            tiktoken_user_first = (
+                usr.get('prompt', 0) + usr.get('tool_result', 0)
+            )
+            system_init = max(0, first_total_input - tiktoken_user_first)
+            break
+        if system_init is None:
+            system_init = 0
+
+        for group in grouped_messages:
+            tu = group.get('token_usage')
+            if not tu or tu.get('origin_format') == 'old':
+                continue
+            g_system = 0
+            for m in tu.get('messages', []):
+                cum = m.get('origin_cumulative')
+                if not cum:
+                    m['system'] = 0
+                    continue
+                inner_total = (
+                    int(m.get('input_tokens') or 0)
+                    + int(m.get('cache_creation_input_tokens') or 0)
+                    + int(m.get('cache_read_input_tokens') or 0)
+                    + int(m.get('output_tokens') or 0)
+                )
+                overhead = max(0, inner_total - sum(cum.values()))
+                m_system = min(overhead, system_init)
+                m['system'] = m_system
+                cum['system'] = m_system
+                g_system += m_system
+            tu['origin_total_cumulative']['system'] = g_system
+
+    @staticmethod
+    def summarize_origin_estimates(
+        grouped_messages: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Sanity-check stats for the origin breakdown's estimates.
+
+        Two distinct ratios are computed across all API calls:
+
+        - ``output_ratio = (thinking + text + tool_use) / output_tokens``:
+          how close the per-call output-side estimate lands to the API's
+          reported ``output_tokens``. The output_tokens value is recorded
+          directly in the JSONL so this is an apples-to-apples accuracy
+          check on tiktoken+0.29-signature decomposition. <1.0 means
+          under-count (typical for English/code), >1.0 means over-count.
+
+        - ``bar_scale = budget / raw_sum``: how much the visualization
+          had to scale the five estimated categories to fit each bar.
+          By construction (system = inner_total - 5cat_sum), this is
+          1.0 in the common case.
+        """
+        out_ratios: List[float] = []
+        bar_scales: List[float] = []
+        for group in grouped_messages:
+            tu = group.get('token_usage', {}) or {}
+            if tu.get('origin_format') == 'old':
+                continue
+            for m in tu.get('messages', []):
+                ot = int(m.get('output_tokens') or 0)
+                origin = m.get('origin') or {}
+                if ot > 0 and origin:
+                    est_out = (
+                        int(origin.get('thinking') or 0)
+                        + int(origin.get('text') or 0)
+                        + int(origin.get('tool_use') or 0)
+                    )
+                    if est_out > 0:
+                        out_ratios.append(est_out / ot)
+
+                cum = m.get('origin_cumulative') or {}
+                if cum:
+                    inner_total = (
+                        int(m.get('input_tokens') or 0)
+                        + int(m.get('cache_creation_input_tokens') or 0)
+                        + int(m.get('cache_read_input_tokens') or 0)
+                        + int(m.get('output_tokens') or 0)
+                    )
+                    sys_sum = int(cum.get('system') or 0)
+                    raw_sum = sum(
+                        int(cum.get(k) or 0)
+                        for k in ('prompt', 'tool_result', 'thinking', 'text', 'tool_use')
+                    )
+                    if inner_total > 0 and raw_sum > 0:
+                        budget = max(inner_total - sys_sum, 0)
+                        bar_scales.append(budget / raw_sum)
+        if not out_ratios and not bar_scales:
+            return None
+
+        def stats(xs: List[float]) -> Optional[Dict[str, float]]:
+            if not xs:
+                return None
+            xs = sorted(xs)
+            n = len(xs)
+            def pct(p):
+                return xs[min(n - 1, max(0, int(round(p * (n - 1)))))]
+            return {
+                'count': n,
+                'min': xs[0],
+                'p25': pct(0.25),
+                'median': pct(0.50),
+                'p75': pct(0.75),
+                'p95': pct(0.95),
+                'max': xs[-1],
+            }
+        return {
+            'output_ratio': stats(out_ratios),
+            'bar_scale': stats(bar_scales),
+        }
 

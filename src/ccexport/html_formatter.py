@@ -167,6 +167,11 @@ class HTMLExtractFormatter:
                 'subagents': tu.get('subagents', []),
                 'duration': format_duration(msg.get('duration_ms'))
                     if msg.get('duration_ms') is not None else None,
+                # Group-total cumulative origin — the per-category sum of
+                # this group's inner-call cumulatives, mirroring how the
+                # 4-component group total sums per-call usages.
+                'origin_total_cumulative': tu.get('origin_total_cumulative'),
+                'origin_format': tu.get('origin_format', 'new'),
             })
 
         if not viz_groups:
@@ -180,6 +185,13 @@ class HTMLExtractFormatter:
         # Widths are computed as percentage of max_total (the default "both" scale).
         for g in viz_groups:
             g['segments'] = self._segments_pct(g['total'], max_total)
+            # Group origin bar: scale segments to the 4-component group
+            # total so 5-category origin + overhead exactly fills the bar.
+            g['origin_segments'] = self._origin_segments_for_bar(
+                g.get('origin_total_cumulative'),
+                g['total_sum'],
+                max_total,
+            )
 
             inner = []
             for m in g['messages']:
@@ -196,6 +208,10 @@ class HTMLExtractFormatter:
                     'label': m.get('model') or 'assistant',
                     'total_sum': inner_total,
                     'raw_usage': m,
+                    # Per-call cumulative origin (running totals through
+                    # this API call); inner bar will scale to inner_total.
+                    'origin_cumulative': m.get('origin_cumulative'),
+                    'format': m.get('format', 'new'),
                 })
             for sa in g['subagents']:
                 sa_total = sa.get('total', {})
@@ -215,9 +231,16 @@ class HTMLExtractFormatter:
                     'label': label,
                     'total_sum': sa_sum,
                     'raw_usage': sa_total,
+                    'origin': None,  # subagent origin not decomposed
+                    'format': 'new',
                 })
             g['inner_bars_raw'] = inner
             g['tooltip'] = self._format_token_tooltip(g['total'], g['total_sum'])
+            g['origin_tooltip'] = self._format_origin_tooltip(
+                g.get('origin_total_cumulative'),
+                g['total_sum'],
+                g.get('origin_format', 'new'),
+            )
 
         # max_inner across all inner bars in all groups (for inner-only autoscale)
         max_inner = 0
@@ -236,6 +259,13 @@ class HTMLExtractFormatter:
                     'label': ib['label'],
                     'total_sum': ib['total_sum'],
                     'segments': self._segments_pct(ib['raw_usage'], max_total),
+                    'origin_segments': self._origin_segments_for_bar(
+                        ib.get('origin_cumulative'),
+                        ib['total_sum'],
+                        max_total,
+                    ) if ib.get('format') == 'new' and ib['kind'] == 'api_call'
+                      else [],
+                    'format': ib.get('format', 'new'),
                 }
                 for ib in g['inner_bars_raw']
             ]
@@ -320,6 +350,91 @@ class HTMLExtractFormatter:
             f"output: {int(total.get('output_tokens') or 0):,}",
         ]
         return ' | '.join(parts)
+
+    @staticmethod
+    def _origin_segments_for_bar(
+        origin_cum: Optional[Dict[str, int]],
+        target_sum: int,
+        max_total: int,
+    ) -> List[Dict[str, Any]]:
+        """Build origin-mode segments that exactly fill ``target_sum`` tokens.
+
+        ``origin_cum`` is a cumulative dict carrying both the five
+        estimated content categories (prompt, tool_result, thinking,
+        text, tool_use) and the two residual categories computed by the
+        extractor (``system`` and ``notice``). ``target_sum`` is the
+        corresponding 4-component total. The two residual categories
+        already sum to the bar's overhead by construction, so the
+        remaining budget for the five estimated categories is
+        ``target_sum - system - notice``; we scale those five to fit
+        that budget so the bar fills exactly ``target_sum``.
+        """
+        if max_total <= 0 or target_sum <= 0 or not origin_cum:
+            return []
+        est_keys = [
+            ('origin_prompt', 'prompt'),
+            ('origin_tool_result', 'tool_result'),
+            ('origin_thinking', 'thinking'),
+            ('origin_text', 'text'),
+            ('origin_tool_use', 'tool_use'),
+        ]
+        sys_keys = [
+            ('origin_system', 'system'),
+        ]
+        raw_sum = sum(int(origin_cum.get(k, 0) or 0) for _, k in est_keys)
+        sys_sum = sum(int(origin_cum.get(k, 0) or 0) for _, k in sys_keys)
+        budget = max(target_sum - sys_sum, 0)
+        scale = 0.0
+        if raw_sum > 0:
+            scale = budget / raw_sum
+        segments = []
+        for kind, k in est_keys:
+            v = int(origin_cum.get(k, 0) or 0) * scale
+            if v <= 0:
+                continue
+            segments.append({
+                'kind': kind,
+                'tokens': int(round(v)),
+                'width_pct': (v / max_total) * 100.0,
+            })
+        for kind, k in sys_keys:
+            v = int(origin_cum.get(k, 0) or 0)
+            if v <= 0:
+                continue
+            segments.append({
+                'kind': kind,
+                'tokens': v,
+                'width_pct': (v / max_total) * 100.0,
+            })
+        return segments
+
+    @staticmethod
+    def _format_origin_tooltip(
+        origin_cum: Optional[Dict[str, int]],
+        target_sum: int,
+        fmt: str,
+    ) -> str:
+        if fmt == 'old':
+            return 'origin breakdown: not available (legacy format)'
+        if not origin_cum:
+            return ''
+        est_keys = ['prompt', 'tool_result', 'thinking', 'text', 'tool_use']
+        sys_keys = ['system']
+        raw_sum = sum(int(origin_cum.get(k, 0) or 0) for k in est_keys)
+        sys_sum = sum(int(origin_cum.get(k, 0) or 0) for k in sys_keys)
+        budget = max(target_sum - sys_sum, 0)
+        scale = 1.0
+        if raw_sum > 0:
+            scale = budget / raw_sum
+        parts = []
+        for k in est_keys:
+            v = int(round(int(origin_cum.get(k, 0) or 0) * scale))
+            parts.append(f"{k}: {v:,}")
+        for k in sys_keys:
+            v = int(origin_cum.get(k, 0) or 0)
+            parts.append(f"{k}: {v:,}")
+        suffix = ' (scaled)' if abs(scale - 1.0) > 0.01 else ''
+        return ' | '.join(parts) + suffix
 
     def _prepare_conversations(
         self,

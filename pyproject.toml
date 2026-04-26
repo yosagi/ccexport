@@ -1,6 +1,6 @@
 [project]
 name = "ccexport"
-version = "0.1.16"
+version = "0.1.25"
 description = "Export Claude Code session logs to HTML/Markdown/Org/JSON"
 authors = [
     { name = "@yosagi" }
@@ -12,6 +12,7 @@ dependencies = [
     "rich>=13.0.0",
     "mistune>=3.0.0",
     "jinja2>=3.0.0",
+    "tiktoken>=0.7.0",
 ]
 
 [project.scripts]
