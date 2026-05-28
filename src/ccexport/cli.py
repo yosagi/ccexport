@@ -8,6 +8,7 @@ Designed to be invoked non-interactively from the work-logger skill.
 """
 
 import json
+import socket
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -353,18 +354,26 @@ def _compute_logical_date(iso_timestamp: str, boundary_hour: int, boundary_minut
 
 
 @cli.command()
-@click.option('--project', '-p', required=True, multiple=True,
+@click.option('--project', '-p', multiple=True,
               help='Project name (can be specified multiple times)')
-@click.option('--output', '-o', required=True, type=click.Path(),
-              help='Output directory')
-@click.option('--format', '-f', 'output_format', required=True,
+@click.option('--all', 'all_projects', is_flag=True,
+              help='Export all projects')
+@click.option('--output', '-o', type=click.Path(),
+              help='Output directory (required unless --registry)')
+@click.option('--format', '-f', 'output_format',
               type=click.Choice(['html', 'md', 'org', 'json']),
-              help='Output format')
+              help='Output format (required unless --registry)')
+@click.option('--registry', 'registry_path', type=click.Path(),
+              help='Registry root path (enables registry output mode)')
+@click.option('--hostname', default=None,
+              help='Hostname for registry path (default: system hostname)')
+@click.option('--force', is_flag=True,
+              help='Force re-export even if up-to-date files exist')
 @click.option('--since', default=None,
               help='Export sessions from this date onward (YYYY-MM-DD)')
 @click.option('--name-template', default=None,
               help=f'Filename template (default: {DEFAULT_NAME_TEMPLATE}). '
-                   'Variables: {project}, {date}, {session}, {ext}')
+                   'Variables: {{project}}, {{date}}, {{session}}, {{ext}}')
 @click.option('--detail', '-d', 'detail_level',
               type=click.Choice(['text', 'normal', 'full']),
               default='normal',
@@ -375,13 +384,24 @@ def _compute_logical_date(iso_timestamp: str, boundary_hour: int, boundary_minut
 @click.option('--day-boundary', default='00:00',
               help='Day boundary time in HH:MM (default: 00:00). '
                    'Sessions ending before this time use the previous date.')
-def batch(project: tuple[str, ...], output: str, output_format: str,
+def batch(project: tuple[str, ...], all_projects: bool,
+          output: Optional[str], output_format: Optional[str],
+          registry_path: Optional[str], hostname: Optional[str],
+          force: bool,
           since: Optional[str], name_template: Optional[str],
           detail_level: str,
           verbose: bool,
           titles_dir: Optional[str], day_boundary: str):
     """Batch export all sessions in a project (multiple projects supported)"""
     total_start = time.time()
+
+    # Validate option combinations
+    if not registry_path and (not output or not output_format):
+        click.echo("Error: --output and --format are required unless --registry is specified", err=True)
+        sys.exit(1)
+    if not project and not all_projects:
+        click.echo("Error: --project or --all is required", err=True)
+        sys.exit(1)
 
     # Parse day boundary
     try:
@@ -395,6 +415,13 @@ def batch(project: tuple[str, ...], output: str, output_format: str,
     # Load configuration
     config = Config(verbose=verbose)
     extractor = MessageExtractor(config.projects_dir, config)
+
+    # Resolve project list
+    if all_projects:
+        project = tuple(extractor.list_projects())
+        if not project:
+            click.echo("No projects found", err=True)
+            sys.exit(1)
 
     # Collect sessions from all specified projects
     all_sessions: list[tuple[str, dict]] = []  # (project_name, session_info)
@@ -423,15 +450,61 @@ def batch(project: tuple[str, ...], output: str, output_format: str,
         click.echo("No sessions found for any specified project", err=True)
         sys.exit(1)
 
-    # Prepare output directory
-    output_dir = Path(output)
+    # Dispatch to registry or normal mode
+    if registry_path:
+        exported, failed, skipped, total = _batch_registry(
+            extractor=extractor,
+            config=config,
+            all_sessions=all_sessions,
+            registry_root=Path(registry_path),
+            hostname=hostname or socket.gethostname(),
+            force=force,
+            verbose=verbose,
+        )
+    else:
+        exported, failed, skipped, total = _batch_normal(
+            extractor=extractor,
+            config=config,
+            all_sessions=all_sessions,
+            output_dir=Path(output),
+            output_format=output_format,
+            name_template=name_template,
+            titles_dir=Path(titles_dir) if titles_dir else None,
+            detail_level=detail_level,
+            verbose=verbose,
+            boundary_hour=boundary_hour,
+            boundary_minute=boundary_minute,
+        )
+
+    # Summary
+    elapsed = time.time() - total_start
+    projects_str = ", ".join(sorted(set(Path(p).name for p in project)))
+    summary = f"Done: {exported}/{total} sessions exported from [{projects_str}]"
+    if skipped:
+        summary += f" ({skipped} skipped)"
+    if failed:
+        summary += f" ({failed} failed)"
+    summary += f" [{elapsed:.1f}s]"
+    click.echo(summary, err=True)
+
+
+def _batch_normal(
+    extractor: MessageExtractor,
+    config: Config,
+    all_sessions: list[tuple[str, dict]],
+    output_dir: Path,
+    output_format: str,
+    name_template: Optional[str],
+    titles_dir: Optional[Path],
+    detail_level: str,
+    verbose: bool,
+    boundary_hour: int,
+    boundary_minute: int,
+) -> tuple[int, int, int, int]:
+    """Normal batch export mode (flat directory with template-based filenames)."""
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Filename template
     template = name_template or DEFAULT_NAME_TEMPLATE
-    titles_path = Path(titles_dir) if titles_dir else None
 
-    # Export each session
     exported = 0
     failed = 0
     total = len(all_sessions)
@@ -445,7 +518,6 @@ def batch(project: tuple[str, ...], output: str, output_format: str,
             logical_date = 'unknown'
         short_id = session_id[:8]
 
-        # Use basename of project path for filename (avoid absolute path in filename)
         project_name = Path(proj).name
 
         filename = template.format(
@@ -466,7 +538,7 @@ def batch(project: tuple[str, ...], output: str, output_format: str,
                 output_path=output_path,
                 output_format=output_format,
                 config=config,
-                titles_dir=titles_path,
+                titles_dir=titles_dir,
                 verbose=verbose,
                 detail_level=detail_level,
             )
@@ -475,14 +547,123 @@ def batch(project: tuple[str, ...], output: str, output_format: str,
             click.echo(f"  Error: {e}", err=True)
             failed += 1
 
-    # Summary
-    elapsed = time.time() - total_start
-    projects_str = ", ".join(Path(p).name for p in project)
-    summary = f"Done: {exported}/{total} sessions exported from [{projects_str}]"
-    if failed:
-        summary += f" ({failed} failed)"
-    summary += f" [{elapsed:.1f}s]"
-    click.echo(summary, err=True)
+    return exported, failed, 0, total
+
+
+def _encode_project_dirname(cwd: str) -> str:
+    """Encode project path for registry directory name.
+
+    Strip $HOME/ prefix, then replace '/' and '.' with '-'.
+    e.g. /home/yos/work/ccdash -> work-ccdash
+         /home/yos/.config/wezterm -> -config-wezterm
+    """
+    home = str(Path.home())
+    path = cwd
+    if path.startswith(home + '/'):
+        path = path[len(home) + 1:]
+    elif path.startswith(home):
+        path = path[len(home):]
+    return path.replace('/', '-').replace('.', '-')
+
+
+def _should_skip_registry(log_path: Path, force: bool) -> bool:
+    """Check if a registry _log.json is up-to-date and can be skipped."""
+    if force:
+        return False
+    if not log_path.exists():
+        return False
+    try:
+        with open(log_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('ccexport_version') == CCEXPORT_VERSION
+    except Exception:
+        return False
+
+
+def _write_meta_json(meta_path: Path, meta: dict) -> None:
+    """Write _meta.json, preserving existing digest field if present."""
+    if meta_path.exists():
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                existing = json.load(f)
+            if 'digest' in existing:
+                meta['digest'] = existing['digest']
+        except Exception:
+            pass
+
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+
+
+def _batch_registry(
+    extractor: MessageExtractor,
+    config: Config,
+    all_sessions: list[tuple[str, dict]],
+    registry_root: Path,
+    hostname: str,
+    force: bool,
+    verbose: bool,
+) -> tuple[int, int, int, int]:
+    """Registry batch export mode (structured directory with _log.json + _meta.json)."""
+    exported = 0
+    failed = 0
+    skipped = 0
+    total = len(all_sessions)
+
+    for i, (proj, session) in enumerate(all_sessions, 1):
+        session_id = session['session_id']
+        short_id = session_id[:8]
+        project_basename = Path(proj).name
+
+        cwd = session.get('cwd') or proj
+        project_dirname = _encode_project_dirname(cwd)
+        sessions_dir = registry_root / hostname / project_dirname / 'sessions'
+        log_path = sessions_dir / f"{session_id}_log.json"
+        meta_path = sessions_dir / f"{session_id}_meta.json"
+
+        if _should_skip_registry(log_path, force):
+            if verbose:
+                click.echo(f"[{i}/{total}] Skipping {project_basename}/{short_id} (up-to-date)", err=True)
+            skipped += 1
+            continue
+
+        click.echo(f"[{i}/{total}] Exporting {project_basename}/{short_id} → {project_dirname}/sessions/", err=True)
+
+        try:
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            _export_single_session(
+                extractor=extractor,
+                project_name=proj,
+                session_id=session_id,
+                output_path=log_path,
+                output_format='json',
+                config=config,
+                verbose=verbose,
+                detail_level='full',
+            )
+
+            first_message = extractor.get_first_user_message(proj, session_id)
+
+            meta = {
+                'session_id': session_id,
+                'project': project_basename,
+                'start': session.get('start_time'),
+                'end': session.get('end_time'),
+                'turns': session.get('turn_count', 0),
+                'total_duration_ms': session.get('total_duration_ms') if session.get('has_duration_data') else None,
+                'session_type': session.get('session_type', 'interactive'),
+                'first_message': first_message,
+            }
+            _write_meta_json(meta_path, meta)
+
+            exported += 1
+        except Exception as e:
+            click.echo(f"  Error: {e}", err=True)
+            failed += 1
+
+    return exported, failed, skipped, total
 
 
 def _export_single_session(

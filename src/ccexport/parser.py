@@ -212,6 +212,20 @@ class SessionParser:
                                 session_id=data.get('sessionId', ''),
                                 raw_data=data
                             ))
+                    elif entry_type == 'attachment':
+                        uuid = data.get('uuid', '')
+                        if uuid:
+                            att = data.get('attachment', {})
+                            is_injected = (isinstance(att, dict)
+                                           and att.get('commandMode') == 'prompt')
+                            nodes.append(MessageNode(
+                                uuid=uuid,
+                                parent_uuid=data.get('parentUuid'),
+                                type='injected_prompt' if is_injected else 'attachment',
+                                timestamp=data.get('timestamp', ''),
+                                session_id=data.get('sessionId', ''),
+                                raw_data=data
+                            ))
                     # Ignore other types (e.g., file-history-snapshot)
 
                 except json.JSONDecodeError as e:

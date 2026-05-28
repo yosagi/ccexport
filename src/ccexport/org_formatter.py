@@ -362,6 +362,15 @@ class OrgFormatter:
             lines.append("")
 
             for assistant_msg in assistant_msgs:
+                if assistant_msg.get('type') == 'injected_prompt':
+                    prompt_text = assistant_msg.get('content', '')
+                    if prompt_text.strip():
+                        lines.append(f"**** 💬 User")
+                        lines.append(f"#+BEGIN_QUOTE")
+                        lines.append(prompt_text)
+                        lines.append(f"#+END_QUOTE")
+                        lines.append("")
+                    continue
                 content_items = assistant_msg.get('content_items')
                 if content_items and detail_level != 'text':
                     lines.extend(self._render_content_items_org(content_items, detail_level))

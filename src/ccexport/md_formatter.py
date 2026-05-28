@@ -267,6 +267,15 @@ def format_as_markdown(messages: list, project_name: str, grouped: bool,
                 lines.append("**Assistant response**:")
                 lines.append("")
                 for j, assistant_msg in enumerate(group['assistant_messages'], 1):
+                    if assistant_msg.get('type') == 'injected_prompt':
+                        prompt_text = assistant_msg.get('content', '')
+                        if prompt_text.strip():
+                            lines.append(f"### {j}. {_to_local_ts(assistant_msg.get('timestamp', ''))} 💬 User")
+                            lines.append("")
+                            lines.append(f"> {prompt_text}")
+                            lines.append("")
+                        continue
+
                     timestamp_detail = assistant_msg.get('timestamp', '')
 
                     lines.append(f"### {j}. {_to_local_ts(timestamp_detail)}")

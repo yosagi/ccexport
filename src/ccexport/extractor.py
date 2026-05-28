@@ -225,8 +225,8 @@ class MessageExtractor:
         )
 
         for node in sorted_nodes:
-            # Extract only user/assistant
-            if node.type not in ('user', 'assistant'):
+            # Extract only user/assistant/injected_prompt
+            if node.type not in ('user', 'assistant', 'injected_prompt'):
                 continue
 
             # Filter by session ID
@@ -300,6 +300,12 @@ class MessageExtractor:
         """
         timestamp = node.timestamp
         raw_data = node.raw_data
+
+        # Injected prompt: content is in attachment.prompt, not message
+        if node.type == 'injected_prompt':
+            att = raw_data.get('attachment', {})
+            content = att.get('prompt', '') if isinstance(att, dict) else ''
+            return (timestamp, hash(content[:500]))
 
         # Get message content
         message = raw_data.get('message', {})
@@ -607,6 +613,14 @@ class MessageExtractor:
                 'uuid': node.uuid,
                 'parentUuid': node.parent_uuid  # Keep DAG information
             }
+
+            # Injected prompt (user typed while assistant was responding)
+            if node.type == 'injected_prompt':
+                att = raw_data.get('attachment', {})
+                prompt_text = att.get('prompt', '')
+                processed['role'] = 'user'
+                processed['content'] = prompt_text
+                return processed
 
             # Extract plan approval/rejection/Q&A information
             tool_use_result = raw_data.get('toolUseResult', {})
@@ -1006,6 +1020,9 @@ class MessageExtractor:
                     'skill_name': skill_name
                 }
 
+            elif msg.get('type') == 'injected_prompt' and current_group:
+                current_group['assistant_messages'].append(msg)
+
             elif msg.get('type') == 'assistant' and current_group:
                 # Add assistant message to current group
                 current_group['assistant_messages'].append(msg)
@@ -1050,6 +1067,13 @@ class MessageExtractor:
             combined_items = []
             tool_count = 0
             for msg in group['assistant_messages']:
+                if msg.get('type') == 'injected_prompt':
+                    combined_items.append({
+                        'type': 'injected_prompt',
+                        'content': msg.get('content', ''),
+                        'timestamp': msg.get('timestamp', ''),
+                    })
+                    continue
                 for ci in msg.get('content_items', []):
                     combined_items.append(ci)
                     if ci['type'] == 'tool_use':
@@ -1433,6 +1457,61 @@ class MessageExtractor:
 
         return content
     
+    def get_first_user_message(self, project_name: str, session_id: str) -> Optional[str]:
+        """Get the first real user message text from a session JSONL.
+
+        Reads the JSONL sequentially until a non-skill user message is found.
+        Lightweight — does not parse the full DAG.
+
+        Args:
+            project_name: Project name (cwd path)
+            session_id: Session ID (UUID)
+
+        Returns:
+            First user message text, or None if not found
+        """
+        project_path = self._find_project_dir(project_name)
+        if not project_path:
+            return None
+
+        jsonl_file = project_path / f"{session_id}.jsonl"
+        if not jsonl_file.exists():
+            return None
+
+        try:
+            with open(jsonl_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get('type') != 'user':
+                        continue
+
+                    message = data.get('message', {})
+                    if isinstance(message, dict):
+                        content = message.get('content', '')
+                    else:
+                        content = data.get('content', '')
+
+                    if isinstance(content, list):
+                        text_parts = [
+                            b.get('text', '') for b in content
+                            if isinstance(b, dict) and b.get('type') == 'text'
+                        ]
+                        content = '\n'.join(text_parts)
+                    if not isinstance(content, str):
+                        continue
+                    if content.startswith('Base directory for this skill:'):
+                        continue
+                    return content.strip() if content else None
+        except Exception:
+            return None
+        return None
+
     def list_session_ids(self, project_name: str) -> List[Dict[str, Any]]:
         """
         Get list of session IDs in project (lightweight, minimal JSONL parsing)

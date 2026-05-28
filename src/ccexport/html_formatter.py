@@ -513,6 +513,18 @@ class HTMLExtractFormatter:
 
                     html_parts = []
                     for assistant_msg in assistant_msgs:
+                        if assistant_msg.get('type') == 'injected_prompt':
+                            prompt_text = assistant_msg.get('content', '')
+                            if prompt_text.strip():
+                                prompt_html = self._convert_markdown_to_html(
+                                    prompt_text, collapse_code_blocks, min_lines_to_collapse
+                                )
+                                html_parts.append(
+                                    f'<div class="injected-prompt">'
+                                    f'<span class="injected-prompt-label">💬 User</span>'
+                                    f'{prompt_html}</div>'
+                                )
+                            continue
                         content_items = assistant_msg.get('content_items')
                         if content_items and detail_level != 'text':
                             # Render interleaved content
