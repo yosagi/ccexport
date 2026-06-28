@@ -25,9 +25,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ccexport"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/ccexport/templates" = "ccexport/templates"
-
 [tool.hatch.build.targets.sdist]
 include = [
     "src/ccexport/**/*",
