@@ -54,7 +54,10 @@ def count_text_tokens(text: str) -> int:
         # English-leaning text. This branch should not normally fire because
         # tiktoken is in the package's hard dependencies.
         return max(1, len(text) // 4)
-    return len(enc.encode(text))
+    # disallowed_special=() treats special-token strings (e.g. a literal
+    # "<|endoftext|>" appearing in conversation text) as ordinary text
+    # instead of raising.
+    return len(enc.encode(text, disallowed_special=()))
 
 
 def count_tool_use_tokens(name: str, input_dict: Any) -> int:

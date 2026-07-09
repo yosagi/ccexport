@@ -4,12 +4,15 @@
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 # Spinner character pattern
 SPINNER_PATTERN = re.compile(r'^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠐⠂✳★☆] ')
+
+# Bare URI title (e.g. file:///path/to/file emitted when opening a file)
+URI_TITLE_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://\S+$')
 
 
 def remove_spinner(title: str) -> str:
@@ -53,13 +56,63 @@ def format_duration(ms: int) -> str:
     return f"{minutes}m{seconds:02d}s"
 
 
-def load_osc_logs(titles_dir: Path) -> List[Dict]:
-    """Load all osc-tap logs from specified directory"""
+# Safety margin for clock slop when overlapping file/session time windows
+WINDOW_MARGIN_SECONDS = 60
+
+
+def find_candidate_files(
+    titles_dir: Path,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None
+) -> List[Path]:
+    """Narrow log files by time-window overlap without reading them.
+
+    A log file covers [filename timestamp (YYYYMMDD_HHMMSS, local time),
+    mtime]. Files whose window overlaps [start_time, end_time] are
+    candidates. Files with unparseable names are kept (safe side).
+    """
+    candidates = []
+    local_tz = datetime.now().astimezone().tzinfo
+    has_window = start_time is not None or end_time is not None
+    slop = timedelta(seconds=WINDOW_MARGIN_SECONDS)
+
+    for jsonl_path in sorted(titles_dir.glob('*.jsonl')):
+        if not has_window:
+            candidates.append(jsonl_path)
+            continue
+        try:
+            file_start = datetime.strptime(
+                jsonl_path.stem, '%Y%m%d_%H%M%S').replace(tzinfo=local_tz)
+            file_end = datetime.fromtimestamp(
+                jsonl_path.stat().st_mtime, tz=local_tz)
+        except (ValueError, OSError):
+            candidates.append(jsonl_path)
+            continue
+
+        if end_time and file_start > end_time + slop:
+            continue
+        if start_time and file_end < start_time - slop:
+            continue
+        candidates.append(jsonl_path)
+
+    return candidates
+
+
+def load_osc_logs(
+    titles_dir: Path,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None
+) -> List[Dict]:
+    """Load osc-tap logs from specified directory.
+
+    When start_time/end_time are given, only files whose time window
+    (filename timestamp to mtime) overlaps the session window are read.
+    """
     logs = []
     if not titles_dir.exists():
         return logs
 
-    for jsonl_path in sorted(titles_dir.glob('*.jsonl')):
+    for jsonl_path in find_candidate_files(titles_dir, start_time, end_time):
         try:
             with open(jsonl_path, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -82,12 +135,14 @@ def find_logs_for_session(
     logs: List[Dict],
     session_id: str,
     start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None,
+    cwd: Optional[str] = None
 ) -> List[Dict]:
     """Filter logs related to specified session
 
     1. Prioritize log files matching by SESSION_ID
-    2. Fall back to time range if no match
+    2. Exclude files whose CWD entry points to another project
+    3. Fall back to time range if no SESSION_ID match
     """
     # Look for files matching SESSION_ID
     matching_files = set()
@@ -98,6 +153,19 @@ def find_logs_for_session(
     if matching_files:
         # Return only logs from SESSION_ID matched files
         return [e for e in logs if e.get('_source_file') in matching_files]
+
+    # Exclude files recorded under a different project directory.
+    # Files without a CWD entry are kept (cannot disambiguate).
+    if cwd:
+        cwd_norm = cwd.rstrip('/')
+        mismatched_files = set()
+        for entry in logs:
+            if entry.get('matcher') == 'CWD' and \
+                    entry.get('string', '').rstrip('/') != cwd_norm:
+                mismatched_files.add(entry.get('_source_file'))
+        if mismatched_files:
+            logs = [e for e in logs
+                    if e.get('_source_file') not in mismatched_files]
 
     # Fallback: filter by time range
     if start_time is None and end_time is None:
@@ -136,6 +204,10 @@ def extract_titles(logs: List[Dict]) -> List[Dict]:
 
         # Skip empty titles or "Claude Code"
         if not clean_title or clean_title == 'Claude Code':
+            continue
+
+        # Skip bare URI titles (noise from file-open events etc.)
+        if URI_TITLE_PATTERN.match(clean_title):
             continue
 
         # Skip consecutive duplicates
@@ -221,7 +293,8 @@ def get_titles_for_export(
     session_id: str,
     messages: List[Dict],
     start_time: Optional[str] = None,
-    end_time: Optional[str] = None
+    end_time: Optional[str] = None,
+    cwd: Optional[str] = None
 ) -> Dict[int, str]:
     """Get title map for export (main API)
 
@@ -231,21 +304,23 @@ def get_titles_for_export(
         messages: Message list
         start_time: Session start time (ISO 8601)
         end_time: Session end time (ISO 8601)
+        cwd: Session working directory (for disambiguation)
 
     Returns:
         Dictionary of {message index: title}
     """
-    # Load logs
-    all_logs = load_osc_logs(titles_dir)
-    if not all_logs:
-        return {}
-
     # Parse timestamps
     start_dt = parse_iso_timestamp(start_time) if start_time else None
     end_dt = parse_iso_timestamp(end_time) if end_time else None
 
+    # Load logs (only files overlapping the session window)
+    all_logs = load_osc_logs(titles_dir, start_dt, end_dt)
+    if not all_logs:
+        return {}
+
     # Filter logs related to session
-    session_logs = find_logs_for_session(all_logs, session_id, start_dt, end_dt)
+    session_logs = find_logs_for_session(all_logs, session_id,
+                                         start_dt, end_dt, cwd=cwd)
 
     # Extract titles
     titles = extract_titles(session_logs)

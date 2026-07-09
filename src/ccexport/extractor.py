@@ -106,9 +106,10 @@ class MessageExtractor:
                 continue
             jsonl_files = list(project_dir.glob('*.jsonl'))
             if jsonl_files:
-                # Get actual cwd and compare
-                cwd = self._get_cwd_from_jsonl(jsonl_files[0])
-                if cwd and cwd == project_name:
+                # Resolve the project root the same way as list_projects()
+                # (first file alone may lack cwd, e.g. summary-only JSONL)
+                root = self._get_project_root_from_jsonls(jsonl_files)
+                if root and root == project_name:
                     return project_dir
 
         return None

@@ -165,15 +165,25 @@ def export(session: str, output: str, output_format: str,
         session_info = extractor.get_session_info(project_name, full_session_id)
         start_time = session_info.get('start_time') if session_info else None
         end_time = session_info.get('end_time') if session_info else None
+        session_cwd = session_info.get('cwd') if session_info else None
 
         titles_map = get_titles_for_export(
             Path(titles_dir),
             full_session_id,
             messages,
             start_time,
-            end_time
+            end_time,
+            cwd=session_cwd
         )
         debug(f"Titles retrieved: {time.time() - t0:.3f}s ({len(titles_map)} items)")
+
+    # 4.7. Header metadata (JSON only)
+    header_meta = None
+    if output_format == 'json':
+        t0 = time.time()
+        header_meta = _build_header_meta(extractor, project_name,
+                                         session_chain, messages)
+        debug(f"Header meta: {time.time() - t0:.3f}s")
 
     # 5. Format conversion
     t0 = time.time()
@@ -181,7 +191,8 @@ def export(session: str, output: str, output_format: str,
     content = _format_messages(messages, project_name, output_format, config,
                                summaries, titles_map, detail_level,
                                output_path=output_path,
-                               all_subagents=all_subagents)
+                               all_subagents=all_subagents,
+                               header_meta=header_meta)
     debug(f"Format conversion ({output_format}): {time.time() - t0:.3f}s")
 
     # 6. Write to file
@@ -714,20 +725,75 @@ def _export_single_session(
         session_info = extractor.get_session_info(project_name, session_id)
         start_time = session_info.get('start_time') if session_info else None
         end_time = session_info.get('end_time') if session_info else None
+        session_cwd = session_info.get('cwd') if session_info else None
         titles_map = get_titles_for_export(
-            titles_dir, session_id, messages, start_time, end_time
+            titles_dir, session_id, messages, start_time, end_time,
+            cwd=session_cwd
         )
         debug(f"Titles: {len(titles_map)} items")
+
+    # Header metadata (JSON only)
+    header_meta = None
+    if output_format == 'json':
+        header_meta = _build_header_meta(extractor, project_name,
+                                         session_chain, messages)
 
     # Format and write
     content = _format_messages(
         messages, project_name, output_format, config,
         all_summaries, titles_map, detail_level,
-        output_path=output_path
+        output_path=output_path,
+        header_meta=header_meta
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(content)
+
+
+FIRST_MESSAGE_MAX_CHARS = 500
+
+
+def _build_header_meta(extractor: MessageExtractor, project_name: str,
+                       session_chain: list, groups: list) -> dict:
+    """Collect lightweight session metadata for the JSON header.
+
+    Aggregates start/end/duration over the continuation chain; turns is the
+    number of user-instruction groups in the exported output.
+    """
+    start = None
+    end = None
+    total_duration_ms = 0
+    has_duration = False
+    session_type = 'interactive'
+
+    for sid in session_chain:
+        info = extractor.get_session_info(project_name, sid)
+        if not info:
+            continue
+        s, e = info.get('start_time'), info.get('end_time')
+        if s and (start is None or s < start):
+            start = s
+        if e and (end is None or e > end):
+            end = e
+        if info.get('has_duration_data'):
+            has_duration = True
+            total_duration_ms += info.get('total_duration_ms', 0)
+        # The requested session is the last in the chain
+        if sid == session_chain[-1]:
+            session_type = info.get('session_type', 'interactive')
+
+    first_message = extractor.get_first_user_message(project_name, session_chain[0])
+    if first_message and len(first_message) > FIRST_MESSAGE_MAX_CHARS:
+        first_message = first_message[:FIRST_MESSAGE_MAX_CHARS]
+
+    return {
+        'start': start,
+        'end': end,
+        'turns': len(groups),
+        'total_duration_ms': total_duration_ms if has_duration else None,
+        'session_type': session_type,
+        'first_message': first_message,
+    }
 
 
 def _format_messages(messages: list, project_name: str,
@@ -736,7 +802,8 @@ def _format_messages(messages: list, project_name: str,
                     titles_map: dict = None,
                     detail_level: str = 'normal',
                     output_path: Path = None,
-                    all_subagents: dict = None) -> str:
+                    all_subagents: dict = None,
+                    header_meta: dict = None) -> str:
     """Format messages"""
     if titles_map is None:
         titles_map = {}
@@ -772,9 +839,10 @@ def _format_messages(messages: list, project_name: str,
         output = {
             'ccexport_version': CCEXPORT_VERSION,
             'project_name': project_name,
-            'messages': messages,
+            'titles': titles_map,
+            'header_meta': header_meta or {},
             'summaries': summaries or [],
-            'titles': titles_map
+            'messages': messages
         }
         return json.dumps(output, ensure_ascii=False, indent=2)
     else:
