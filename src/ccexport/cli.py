@@ -470,6 +470,7 @@ def batch(project: tuple[str, ...], all_projects: bool,
             registry_root=Path(registry_path),
             hostname=hostname or socket.gethostname(),
             force=force,
+            titles_dir=Path(titles_dir) if titles_dir else None,
             verbose=verbose,
         )
     else:
@@ -614,6 +615,7 @@ def _batch_registry(
     registry_root: Path,
     hostname: str,
     force: bool,
+    titles_dir: Optional[Path],
     verbose: bool,
 ) -> tuple[int, int, int, int]:
     """Registry batch export mode (structured directory with _log.json + _meta.json)."""
@@ -651,6 +653,7 @@ def _batch_registry(
                 output_path=log_path,
                 output_format='json',
                 config=config,
+                titles_dir=titles_dir,
                 verbose=verbose,
                 detail_level='full',
             )
